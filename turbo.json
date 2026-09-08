@@ -1,0 +1,42 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "globalDependencies": [
+    "biome.json",
+    "tsconfig.base.json",
+    "tsconfig.server.json",
+    "tsconfig.tui.json"
+  ],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
+    },
+    "lint": {
+      "dependsOn": ["^lint"],
+      "outputs": []
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@macarons/repo-tests#test": {
+      "dependsOn": ["^build"],
+      "outputs": [],
+      // Every suite in tests/repo enumerates the WHOLE repo through
+      // `git ls-files` — plugin manifests, plugin src, plugin test files,
+      // README.md, tests/e2e wiring, the version pin. Turbo hashes only the
+      // files inside a package, so a cache hit here would restore a
+      // repo-wide invariant that was never re-evaluated: deleting a
+      // plugin's describePackaging call reruns that plugin's own tests and
+      // replays this green. No inputs list fixes it either — it would be a
+      // hand-maintained mirror of nine `git ls-files` globs, silently stale
+      // the first time a guard reads something new, which is the same
+      // failure with more moving parts. The suite is ~1.3s uncached.
+      "cache": false
+    },
+    "typecheck": {
+      "dependsOn": ["^build", "^typecheck"],
+      "outputs": []
+    }
+  }
+}

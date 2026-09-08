@@ -1,0 +1,3 @@
+# Compile TUI JSX with the same Solid transform OpenCode uses.
+[test]
+preload = ["@opentui/solid/preload"]

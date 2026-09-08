@@ -1,0 +1,7 @@
+# bun test compiles TUI JSX the way the host does: @opentui/solid's preload
+# applies the real solid transform (dom-expressions) to workspace .tsx files
+# and redirects solid-js's SSR entry to the client build, so rendering-level
+# tests (test/view.test.tsx) exercise genuine fine-grained reactivity instead
+# of the inert react-jsx runtime path.
+[test]
+preload = ["@opentui/solid/preload"]

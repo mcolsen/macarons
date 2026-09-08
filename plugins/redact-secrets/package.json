@@ -1,0 +1,45 @@
+{
+  "name": "@macarons/redact-secrets",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that detects secrets in outbound model requests with a vendored betterleaks rule set and replaces them with placeholders in flight, restoring the real values locally in tool arguments and completed responses — a last line of defense for stray keys on disk or in the environment",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/index.ts"
+  },
+  "files": [
+    "LICENSE",
+    "src",
+    "vendor"
+  ],
+  "scripts": {
+    "build": "bun build src/index.ts --target=bun --outfile=dist/redact-secrets.js",
+    "lint": "biome check src test scripts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "vendor": "bun scripts/vendor-rules.ts"
+  },
+  "engines": {
+    "opencode": ">=1.17.14 <2.0.0"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "secrets",
+    "redaction",
+    "security"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@macarons/permission-rules": "workspace:*",
+    "@opencode-ai/plugin": "1.18.14"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@macarons/plugin-test-harness": "workspace:*",
+    "@types/bun": "^1.4.0",
+    "@types/node": "^26.4.1",
+    "typescript": "^7.0.2"
+  }
+}

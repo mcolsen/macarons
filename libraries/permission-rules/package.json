@@ -1,0 +1,30 @@
+{
+  "name": "@macarons/permission-rules",
+  "version": "0.1.0",
+  "description": "OpenCode V1 permission-rule engine and common helpers shared by Macarons plugins: wildcard matching, last-rule-wins evaluation, store I/O, trust-boundary path containment, server locality, and supported-version gates",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "LICENSE",
+    "src"
+  ],
+  "scripts": {
+    "lint": "biome check src test",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "opencode",
+    "permissions"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@types/bun": "^1.4.0",
+    "@types/node": "^26.4.1",
+    "typescript": "^7.0.2"
+  }
+}

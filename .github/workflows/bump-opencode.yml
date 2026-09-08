@@ -1,0 +1,370 @@
+name: Nightly OpenCode bump
+
+# Checks whether OpenCode has published a release newer than the pin in
+# .opencode-version. If not, exits successfully. If so, bumps the pin
+# everywhere it appears and opens (or refreshes) a single rolling PR. The
+# bump is deliberately unvalidated here: CI on the PR is the gate, and a
+# human merges it.
+#
+# Macarons tracks OpenCode evergreen (issue #33): the bump advances not just
+# the e2e pin but every workspace package's @opencode-ai/* pins and the shared
+# SUPPORTED_OPENCODE_RANGE constant — floor = the pin, ceiling = the pin's
+# next minor line. (package.json#engines stays a static v1-wide install gate
+# on purpose: OpenCode's npm route hard-enforces engines, so a ratcheting
+# range would refuse installs on any host lagging the pin.) The bump PR's CI is
+# therefore the current-host typecheck lane: a release whose plugin API types
+# break a plugin turns this PR red, and the fix lands on main (never on the
+# bump branch — it is force-pushed on every refresh). A major-version release
+# is never ratcheted mechanically; the job fails loudly for a human decision.
+#
+# Accepted supply-chain exposure, by design: a compromised upstream OpenCode
+# release published under a new version would be pinned here and executed on
+# CI runners (by the bump PR's e2e jobs) within ~24 hours. Mitigations: this
+# workflow only records GitHub's own release digests and never runs anything
+# it downloads, the e2e jobs run the pinned binary with a read-only token
+# and no secrets, and nothing reaches main without a human merging the PR.
+# The same acceptance covers the @opencode-ai/* npm packages the bump PR's
+# `bun install` brings into every workspace on CI.
+
+on:
+  schedule:
+    - cron: "47 3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: bump-opencode
+  cancel-in-progress: false
+
+env:
+  BRANCH: chore/bump-opencode
+
+jobs:
+  bump:
+    name: Check for a newer OpenCode release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      dispatch-ci: ${{ steps.publish.outputs.dispatch-ci }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Compare pinned version with the latest release
+        id: versions
+        run: |
+          set -euo pipefail
+          pinned="$(cat .opencode-version)"
+          latest="$(curl --fail --silent --show-error https://registry.npmjs.org/opencode-ai/latest | jq -r .version)"
+          echo "Pinned: $pinned  Latest: $latest"
+          [[ "$latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::Unexpected latest version format: $latest"
+            exit 1
+          }
+          if [ "$latest" = "$pinned" ] || [ "$(printf '%s\n%s\n' "$pinned" "$latest" | sort -V | tail -n1)" = "$pinned" ]; then
+            echo "Pinned version is up to date."
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The evergreen ratchet stops at a major boundary: the plugins
+          # hard-disable on non-v1 hosts, so crossing one is a support-policy
+          # decision made by hand, not a mechanical rewrite. Fail loudly.
+          if [ "${latest%%.*}" != "${pinned%%.*}" ]; then
+            echo "::error::OpenCode $latest crosses a major boundary (pinned: $pinned). Revisit the support policy and bump by hand."
+            exit 1
+          fi
+          # The e2e package and workspace packages may pin @opencode-ai/*
+          # dependencies. These packages are published in lockstep with the
+          # CLI, but if a publish is still in flight the bump PR could not even
+          # install, so retry tomorrow.
+          for pkg in "@opencode-ai/sdk" "@opencode-ai/plugin"; do
+            if ! curl --fail --silent --output /dev/null "https://registry.npmjs.org/$pkg/$latest"; then
+              echo "$pkg@$latest is not on npm yet; retrying on the next run."
+              echo "bump=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          {
+            echo "bump=true"
+            echo "pinned=$pinned"
+            echo "latest=$latest"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Reconcile with any existing bump PR
+        if: steps.versions.outputs.bump == 'true'
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          title="Bump pinned OpenCode to ${{ steps.versions.outputs.latest }}"
+
+          # `--head` also matches fork PRs whose branch shares the name, so
+          # an outsider could otherwise suppress bumps by opening (or having
+          # closed) such a PR. Only PRs from this repository count.
+          open_pr="$(gh pr list --head "$BRANCH" --state open --json number,title,headRepositoryOwner \
+            | jq --arg owner "$OWNER" '[.[] | select(.headRepositoryOwner.login == $owner)][0] // empty')"
+          if [ -n "$open_pr" ]; then
+            number="$(jq -r .number <<<"$open_pr")"
+            open_title="$(jq -r .title <<<"$open_pr")"
+            details="$(gh pr view "$number" --json headRefOid,commits)"
+            head="$(jq -er '.headRefOid | select(test("^[0-9a-f]{40}$"))' <<<"$details")"
+            if [ "$open_title" = "$title" ]; then
+              # Compare immutable SHAs, not baseRefOid (which follows main).
+              # Use the checked-out base: this is what we will rebuild on.
+              base="$(git rev-parse HEAD)"
+              behind="$(gh api "repos/$GITHUB_REPOSITORY/compare/$base...$head" \
+                | jq -er '.behind_by | select(type == "number" and . >= 0 and . == floor)')"
+              if [ "$behind" -eq 0 ]; then
+                echo "PR #$number already proposes this version and includes the current base; nothing to do."
+                echo "action=skip" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "PR #$number proposes this version but is missing base commits; refreshing it."
+            else
+              echo "PR #$number proposes an older version; refreshing it."
+            fi
+
+            # Both refresh paths must pass the same author guard. gh caps the
+            # commits and authors connections at 100: a full page may omit
+            # human work. Reject incomplete snapshots and unknown coauthors.
+            bot_only="$(jq '.commits | length > 0 and length < 100 and all(.[];
+              (.authors | length) > 0 and (.authors | length) < 100
+              and all(.authors[]; .login == "github-actions" or .login == "github-actions[bot]"))' <<<"$details")"
+            if [ "$bot_only" != "true" ]; then
+              echo "::warning::PR #$number carries non-bot commits or incomplete author information; not force-pushing over them. Land fixes on main, then restore a bot-only branch to resume refreshes. Closing without merging rejects this version."
+              echo "action=skip" >> "$GITHUB_OUTPUT"
+            else
+              {
+                echo "action=update"
+                echo "number=$number"
+                echo "head=$head"
+              } >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          # A bump PR for this exact version that was closed without merging
+          # means it was rejected on purpose; do not nag by reopening it.
+          # Same-repo PRs only, for the same reason as above.
+          rejected="$(gh pr list --head "$BRANCH" --state closed --json title,mergedAt,headRepositoryOwner \
+            | jq --arg title "$title" --arg owner "$OWNER" \
+                '[.[] | select(.headRepositoryOwner.login == $owner and .title == $title and .mergedAt == null)] | length')"
+          if [ "$rejected" -gt 0 ]; then
+            echo "A PR for this version was closed without merging; not reopening."
+            echo "action=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "action=create" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Bun
+        if: steps.versions.outputs.bump == 'true' && steps.pr.outputs.action != 'skip'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          token: ""
+
+      - name: Apply the version bump
+        if: steps.versions.outputs.bump == 'true' && steps.pr.outputs.action != 'skip'
+        run: |
+          set -euo pipefail
+          pinned="${{ steps.versions.outputs.pinned }}"
+          latest="${{ steps.versions.outputs.latest }}"
+
+          # Every file that states the pinned version, each rewritten by a
+          # replacement scoped to how that file carries it — a bare global
+          # substitution could corrupt an unrelated string that happens to
+          # contain the version. The guards make a silent miss impossible:
+          # if a file stops mentioning the pin, fix this section rather than
+          # letting the bump drift.
+
+          # The verified band derives from each version: floor = the release,
+          # ceiling = its next minor line. The major guard in the compare step
+          # means both bands always share a major here. (Docs no longer state
+          # the pin or the band in prose — they describe the ratchet policy —
+          # so there is nothing to rewrite outside structured files.)
+          major="${latest%%.*}"; rest="${latest#*.}"; minor="${rest%%.*}"
+          new_band=">=$latest <$major.$((minor + 1)).0"
+          pmajor="${pinned%%.*}"; prest="${pinned#*.}"; pminor="${prest%%.*}"
+          old_band=">=$pinned <$pmajor.$((pminor + 1)).0"
+
+          # The shared library is the sole definition site of the band; every
+          # plugin re-exports the constant from there.
+          lib=libraries/permission-rules/src/index.ts
+          grep -Fq "SUPPORTED_OPENCODE_RANGE = \"$old_band\"" "$lib" || {
+            echo "::error::$lib no longer declares the band $old_band; update bump-opencode.yml."
+            exit 1
+          }
+          perl -pi -e "s/\QSUPPORTED_OPENCODE_RANGE = \"$old_band\"\E/SUPPORTED_OPENCODE_RANGE = \"$new_band\"/" "$lib"
+
+          # Every tracked workspace manifest may pin @opencode-ai/* packages
+          # (runtime deps where the host loads src, dev deps otherwise). Drive
+          # the inventory from git so a library or test package cannot silently
+          # fall outside this ratchet.
+          # engines.opencode is a static v1-wide install gate the bump never
+          # touches (see OPENCODE_ENGINE_RANGE in the shared library). Guards
+          # first: a package that stops carrying a pin means this section needs
+          # updating, not a silent skip.
+          mapfile -t package_files < <(
+            git ls-files \
+              ':(glob)package.json' \
+              ':(glob)plugins/*/package.json' \
+              ':(glob)libraries/*/package.json' \
+              ':(glob)tools/*/package.json' \
+              ':(glob)tests/*/package.json'
+          )
+          [ "${#package_files[@]}" -gt 10 ] || {
+            echo "::error::Could not enumerate the tracked workspace package manifests."
+            exit 1
+          }
+          for file in "${package_files[@]}"; do
+            stale="$(jq -r --arg pinned "$pinned" '
+              [.dependencies // {}, .devDependencies // {}]
+              | map(to_entries[] | select(.key | startswith("@opencode-ai/")) | select(.value != $pinned))
+              | length' "$file")"
+            [ "$stale" = "0" ] || {
+              echo "::error::$file pins an @opencode-ai package away from $pinned; update bump-opencode.yml."
+              exit 1
+            }
+            jq --arg version "$latest" '
+              (if .dependencies then .dependencies |= with_entries(if (.key | startswith("@opencode-ai/")) then .value = $version else . end) else . end)
+              | (if .devDependencies then .devDependencies |= with_entries(if (.key | startswith("@opencode-ai/")) then .value = $version else . end) else . end)
+            ' "$file" > "$file.tmp"
+            mv "$file.tmp" "$file"
+          done
+          printf '%s\n' "$latest" > .opencode-version
+
+      - name: Record release checksums
+        if: steps.versions.outputs.bump == 'true' && steps.pr.outputs.action != 'skip'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          latest="${{ steps.versions.outputs.latest }}"
+
+          # Pin GitHub's SHA-256 digest metadata for every CLI artifact the
+          # harness can select. CI exercises this same verified downloader.
+          gh api "repos/anomalyco/opencode/releases/tags/v$latest" \
+            | jq --arg version "$latest" '
+                [
+                  "opencode-linux-x64.tar.gz",
+                  "opencode-linux-x64-musl.tar.gz",
+                  "opencode-linux-x64-baseline.tar.gz",
+                  "opencode-linux-x64-baseline-musl.tar.gz",
+                  "opencode-linux-arm64.tar.gz",
+                  "opencode-linux-arm64-musl.tar.gz",
+                  "opencode-darwin-arm64.zip",
+                  "opencode-darwin-x64.zip",
+                  "opencode-darwin-x64-baseline.zip"
+                ] as $expected
+                | [.assets[] | select(.name as $name | $expected | index($name))
+                    | {key: .name, value: (.digest // "" | sub("^sha256:"; ""))}]
+                | sort_by(.key)
+                | if length != ($expected | length) or any(.[]; .value | test("^[0-9a-f]{64}$") | not)
+                  then error("release omitted a required SHA-256 asset digest")
+                  else {version: $version, assets: from_entries}
+                  end
+              ' > .opencode-checksums.json
+
+      - name: Refresh dependency lockfile
+        if: steps.versions.outputs.bump == 'true' && steps.pr.outputs.action != 'skip'
+        run: |
+          bun install --lockfile-only --ignore-scripts
+          git diff --stat
+
+      - name: Push the branch and open or refresh the PR
+        if: steps.versions.outputs.bump == 'true' && steps.pr.outputs.action != 'skip'
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pinned="${{ steps.versions.outputs.pinned }}"
+          latest="${{ steps.versions.outputs.latest }}"
+          title="Bump pinned OpenCode to $latest"
+          body="$(cat <<EOF
+          Nightly check: OpenCode $latest is out; the pin was $pinned.
+
+          Mechanical bump of every surface that carries the pin:
+
+          - \`.opencode-version\` — canonical pin used by the e2e jobs
+          - \`.opencode-checksums.json\` — GitHub-published SHA-256 digests for every supported CLI artifact
+          - \`bun.lock\` — the resolved workspace dependency graph
+          - every workspace package's \`@opencode-ai/*\` pins
+          - \`SUPPORTED_OPENCODE_RANGE\` in \`libraries/permission-rules\` — the verified band; floor = this pin (\`engines\` is a static v1-wide install gate and does not move)
+
+          Nothing was validated by this workflow on purpose: this PR's CI run
+          typechecks every plugin against the $latest packages and downloads,
+          verifies, and exercises the $latest binary, so merge manually once it
+          is green. If CI is red, the new host's plugin API broke something:
+          land the fix on main — never on this branch, which is force-pushed
+          on every refresh — and the PR will refresh green. (A major-version
+          release never reaches this PR; the nightly job halts loudly instead,
+          because crossing a major is a support-policy decision made by hand.)
+          EOF
+          )"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+
+          mapfile -t package_files < <(
+            git ls-files \
+              ':(glob)package.json' \
+              ':(glob)plugins/*/package.json' \
+              ':(glob)libraries/*/package.json' \
+              ':(glob)tools/*/package.json' \
+              ':(glob)tests/*/package.json'
+          )
+          git add -- \
+            .opencode-version \
+            .opencode-checksums.json \
+            bun.lock \
+            libraries/permission-rules/src/index.ts \
+            "${package_files[@]}"
+          if ! git diff --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+            echo "::error::Version bump changed files outside the publish allowlist."
+            git status --short
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo "::error::Version bump produced no changes."
+            exit 1
+          fi
+          git commit -m "$title"
+          gh auth setup-git
+          # Only replace the head whose authors passed reconciliation. An
+          # empty expected head (create) requires an absent branch, so an
+          # orphaned branch is also left for a human rather than overwritten.
+          git push --force-with-lease="refs/heads/$BRANCH:${{ steps.pr.outputs.head }}" origin "HEAD:refs/heads/$BRANCH"
+
+          if [ "${{ steps.pr.outputs.action }}" = "update" ]; then
+            gh pr edit "${{ steps.pr.outputs.number }}" --title "$title" --body "$body"
+          else
+            gh pr create --base main --head "$BRANCH" --title "$title" --body "$body"
+          fi
+          echo "dispatch-ci=true" >> "$GITHUB_OUTPUT"
+
+  dispatch-ci:
+    name: Run CI on the bump branch
+    needs: bump
+    if: needs.bump.outputs.dispatch-ci == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+
+    steps:
+      - name: Dispatch CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"

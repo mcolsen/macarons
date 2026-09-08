@@ -1,0 +1,49 @@
+{
+  "name": "@macarons/background-tasks",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that adds Claude Code-style background tasks: run shell commands in the background, read their output incrementally, wait on patterns, kill them, and get notified in the conversation when they finish",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/index.ts",
+    "./tui": "./src/tui.tsx"
+  },
+  "files": [
+    "LICENSE",
+    "src"
+  ],
+  "scripts": {
+    "build": "bun build src/index.ts --target=bun --outfile=dist/background-tasks.js",
+    "lint": "biome check src test",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "opencode": ">=1.17.14 <2.0.0"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "background-tasks",
+    "bash"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@macarons/permission-rules": "workspace:*",
+    "@opencode-ai/plugin": "1.18.14",
+    "unbash": "4.0.11"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@macarons/plugin-test-harness": "workspace:*",
+    "@opencode-ai/sdk": "1.18.14",
+    "@opentui/core": "0.5.10",
+    "@opentui/keymap": "0.5.10",
+    "@opentui/solid": "0.5.10",
+    "@types/bun": "^1.4.0",
+    "@types/node": "^26.4.1",
+    "solid-js": "1.9.15",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "name": "@macarons/subagents-sidebar",
+  "version": "0.1.0",
+  "description": "OpenCode TUI plugin that lists the viewed session's subagents in the sidebar — agent, task, elapsed time, and a warning when one is waiting on a permission or question — with a /subagents palette list that jumps to any subagent's session",
+  "type": "module",
+  "exports": {
+    "./tui": "./src/tui.tsx"
+  },
+  "files": [
+    "LICENSE",
+    "src"
+  ],
+  "scripts": {
+    "lint": "biome check src test",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "opencode": ">=1.17.14 <2.0.0"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "subagents",
+    "task-tool",
+    "sidebar"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@macarons/permission-rules": "workspace:*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@macarons/plugin-test-harness": "workspace:*",
+    "@opencode-ai/plugin": "1.18.14",
+    "@opencode-ai/sdk": "1.18.14",
+    "@opentui/core": "0.5.10",
+    "@opentui/keymap": "0.5.10",
+    "@opentui/solid": "0.5.10",
+    "@types/bun": "^1.4.0",
+    "@types/node": "^26.4.1",
+    "solid-js": "1.9.15",
+    "typescript": "^7.0.2"
+  }
+}

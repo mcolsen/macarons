@@ -1,0 +1,36 @@
+{
+  "name": "@macarons/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "e2e": "bun run e2e:server && bun run e2e:install",
+    "e2e:btw": "bun test btw/server.e2e.test.ts --max-concurrency=1 --timeout 90000",
+    "e2e:background-tasks": "bun test background-tasks/server.e2e.test.ts --max-concurrency=1 --timeout 90000",
+    "e2e:background-tasks:shutdown": "bun test background-tasks/shutdown.e2e.test.ts --max-concurrency=1 --timeout 90000",
+    "e2e:bundle": "bun test persist-permissions/bundle.e2e.test.ts approve-for-me/bundle.e2e.test.ts --max-concurrency=1 --timeout 90000",
+    "e2e:concurrency": "bun test approve-for-me/concurrency.e2e.test.ts --max-concurrency=1 --timeout 180000",
+    "e2e:core": "bun test persist-permissions/server.e2e.test.ts approve-for-me/server.e2e.test.ts --max-concurrency=1 --timeout 120000",
+    "e2e:cron": "bun test cron/server.e2e.test.ts --max-concurrency=1 --timeout 150000",
+    "e2e:install": "bun test persist-permissions/install.e2e.test.ts approve-for-me/install.e2e.test.ts --max-concurrency=1 --timeout 120000",
+    "e2e:subagent-comms": "bun test subagent-comms/server.e2e.test.ts --max-concurrency=1 --timeout 120000",
+    "e2e:redact-secrets": "bun test redact-secrets/server.e2e.test.ts --max-concurrency=1 --timeout 90000",
+    "e2e:scoped-system-prompts": "bun test scoped-system-prompts/server.e2e.test.ts --max-concurrency=1 --timeout 90000",
+    "e2e:web-search": "bun test web-search/server.e2e.test.ts --max-concurrency=1 --timeout 90000",
+    "e2e:server": "bun run e2e:core && bun run e2e:btw && bun run e2e:background-tasks && bun run e2e:bundle && bun run e2e:concurrency && bun run e2e:cron && bun run e2e:subagent-comms && bun run e2e:redact-secrets && bun run e2e:scoped-system-prompts && bun run e2e:web-search",
+    "e2e:tui": "bun test approve-for-me/tui.e2e.test.ts cache-ratio/tui.e2e.test.ts background-tasks/tui.e2e.test.ts background-tasks/poke.e2e.test.ts btw/tui.e2e.test.ts --max-concurrency=1 --timeout 150000",
+    "e2e:tui:gating": "bun test persist-permissions/tui.e2e.test.ts persist-permissions/remote-tui.e2e.test.ts codex-limits/tui.e2e.test.ts synthetic-limits/tui.e2e.test.ts --max-concurrency=1 --timeout 150000",
+    "e2e:tui:standalone": "bun test approve-for-me/standalone-tui.e2e.test.ts --max-concurrency=1 --timeout 150000",
+    "lint": "biome check .",
+    "test": "bun test harness/harness.test.ts --timeout 30000",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@opencode-ai/sdk": "1.18.14",
+    "@types/bun": "^1.4.0",
+    "@types/node": "^26.4.1",
+    "typescript": "^7.0.2"
+  }
+}

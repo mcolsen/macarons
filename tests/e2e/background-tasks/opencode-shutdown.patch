@@ -1,0 +1,22 @@
+diff --git a/packages/opencode/src/project/instance-store.ts b/packages/opencode/src/project/instance-store.ts
+--- a/packages/opencode/src/project/instance-store.ts
++++ b/packages/opencode/src/project/instance-store.ts
+@@ -177,6 +177,6 @@
+             }
+             yield* disposeEntry(item[0], item[1], exit.value)
+           }),
+-        { discard: true },
++        { concurrency: "unbounded", discard: true },
+       )
+     })
+diff --git a/packages/opencode/src/plugin/index.ts b/packages/opencode/src/plugin/index.ts
+--- a/packages/opencode/src/plugin/index.ts
++++ b/packages/opencode/src/plugin/index.ts
+@@ -271,6 +271,6 @@
+                 Effect.tapError((error) => Effect.logError("plugin dispose hook failed", { error })),
+                 Effect.ignore,
+               ),
+-            { discard: true },
++            { concurrency: "unbounded", discard: true },
+           ),
+         )

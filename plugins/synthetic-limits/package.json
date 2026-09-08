@@ -1,0 +1,46 @@
+{
+  "name": "@macarons/synthetic-limits",
+  "version": "0.1.0",
+  "description": "OpenCode TUI plugin that shows Synthetic five-hour and weekly quotas with their incremental regeneration times in the sidebar for the session and approve-for-me classifier",
+  "type": "module",
+  "exports": {
+    "./tui": "./src/tui.tsx"
+  },
+  "files": [
+    "LICENSE",
+    "src"
+  ],
+  "scripts": {
+    "lint": "biome check src test",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "opencode": ">=1.17.14 <2.0.0"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "synthetic",
+    "rate-limits"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@macarons/permission-rules": "workspace:*",
+    "@macarons/approve-for-me": "workspace:*",
+    "@macarons/usage-limits": "workspace:*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@macarons/plugin-test-harness": "workspace:*",
+    "@opencode-ai/plugin": "1.18.14",
+    "@opencode-ai/sdk": "1.18.14",
+    "@opentui/core": "0.5.10",
+    "@opentui/keymap": "0.5.10",
+    "@opentui/solid": "0.5.10",
+    "@types/bun": "^1.4.0",
+    "@types/node": "^26.4.1",
+    "solid-js": "1.9.15",
+    "typescript": "^7.0.2"
+  }
+}

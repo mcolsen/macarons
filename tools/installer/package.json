@@ -1,0 +1,32 @@
+{
+  "name": "@macarons/installer",
+  "version": "0.1.0",
+  "description": "Interactive installer for Macarons: tick the OpenCode plugins you want and it patches every user-level config file OpenCode loads plugins from",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "install-plugins": "./src/cli.ts"
+  },
+  "scripts": {
+    "start": "bun run src/cli.ts",
+    "lint": "biome check src test",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "installer"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@types/bun": "^1.4.0",
+    "@types/node": "^26.4.1",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@macarons/permission-rules": "workspace:*",
+    "jsonc-parser": "^3.3.1"
+  }
+}

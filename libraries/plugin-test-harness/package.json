@@ -1,0 +1,33 @@
+{
+  "name": "@macarons/plugin-test-harness",
+  "version": "0.1.0",
+  "description": "Dev-only test harness for Macarons: shared packaging, bundle, and gating test skeletons; the TuiPlugin api mock core; and async test helpers. Never a runtime dependency — it carries bun:test and @opentui machinery that must not enter the library's dependency surface.",
+  "type": "module",
+  "private": true,
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./tui": "./src/tui.ts",
+    "./view": "./src/view.ts"
+  },
+  "scripts": {
+    "lint": "biome check src test",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@macarons/permission-rules": "workspace:*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@opencode-ai/plugin": "1.18.14",
+    "@opentui/core": "0.5.10",
+    "@opentui/keymap": "0.5.10",
+    "@opentui/solid": "0.5.10",
+    "@types/bun": "^1.4.0",
+    "@types/node": "^26.4.1",
+    "solid-js": "1.9.15",
+    "typescript": "^7.0.2"
+  }
+}

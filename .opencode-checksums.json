@@ -1,0 +1,14 @@
+{
+  "version": "1.18.14",
+  "assets": {
+    "opencode-darwin-arm64.zip": "ad8125bb649086eb9210a87bbd27ac453a526e2432aebd4d3c9853e2d42e3291",
+    "opencode-darwin-x64-baseline.zip": "9285df7fade3fdddedab21239b94ca4d872a06e4f5f29ffaad12232c47e9cb6a",
+    "opencode-darwin-x64.zip": "78b2e99a9094ce7a4fb38416990d2b9b23e5f99a9992a37b04fb861f24c48925",
+    "opencode-linux-arm64-musl.tar.gz": "3bdf6a9e66a4008780e3b00a3040c4d958d44f85ba64722ff8470075a9812557",
+    "opencode-linux-arm64.tar.gz": "27ede7aa2080002459d8c970a40016bbef49cd13bb467302777da67467f1602d",
+    "opencode-linux-x64-baseline-musl.tar.gz": "60709e5fe9f3740baeb5cb05a7a25956361f3410e80db2d1afd178c25c16f540",
+    "opencode-linux-x64-baseline.tar.gz": "b267501c7a7cb06cd759106fd97117faa09842404d3dbf05c23d48ffe5af214b",
+    "opencode-linux-x64-musl.tar.gz": "2ef42702c08c1f9baedb5f4618aaa6d8fd9ac09614e577df06731e7f3da3ba84",
+    "opencode-linux-x64.tar.gz": "f23980ba2aebfbfa53948e55e213d3f2a53740fd7326553828e89ad27e970572"
+  }
+}

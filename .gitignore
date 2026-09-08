@@ -1,0 +1,8 @@
+node_modules/
+.turbo/
+dist/
+*.tsbuildinfo
+artifacts/
+# Checkouts of this repo, made in-tree by agent tooling. Never tracked: git
+# refuses to nest a worktree's contents inside its own parent's index.
+.claude/worktrees/

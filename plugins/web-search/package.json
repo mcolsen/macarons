@@ -1,0 +1,49 @@
+{
+  "name": "@macarons/web-search",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that replaces the builtin websearch tool with a privacy-first backend chain: a self-hosted SearXNG instance, the active provider's native web search, and the builtin's Exa endpoint as a last resort",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/index.ts",
+    "./tui": "./src/tui.tsx"
+  },
+  "files": [
+    "LICENSE",
+    "src",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "bun build src/index.ts --target=bun --outfile=dist/web-search.js",
+    "lint": "biome check src test",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "opencode": ">=1.17.14 <2.0.0"
+  },
+  "dependencies": {
+    "@macarons/permission-rules": "workspace:*",
+    "@opencode-ai/plugin": "1.18.14"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "websearch",
+    "searxng"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@macarons/plugin-test-harness": "workspace:*",
+    "@opencode-ai/sdk": "1.18.14",
+    "@opentui/core": "0.5.10",
+    "@opentui/keymap": "0.5.10",
+    "@opentui/solid": "0.5.10",
+    "@types/bun": "^1.4.0",
+    "@types/node": "^26.4.1",
+    "solid-js": "1.9.15",
+    "typescript": "^7.0.2"
+  }
+}

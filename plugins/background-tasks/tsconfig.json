@@ -1,0 +1,4 @@
+{
+  "extends": "../../tsconfig.tui.json",
+  "include": ["src", "test"]
+}
