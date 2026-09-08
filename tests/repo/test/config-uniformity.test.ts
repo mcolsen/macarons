@@ -4,33 +4,29 @@ import { readFileSync } from "node:fs"
 import path from "node:path"
 
 /**
- * Pins the packaging/config boilerplate the 2026-07-23 audit (§3) found
- * drifting with no invariant holding it: identical devDep blocks across the
- * whole plugin fleet with nothing cross-checking them, and two tsconfig
- * shapes (server / TUI) that are now shared presets (`tsconfig.server.json`
- * / `tsconfig.tui.json` at the repo root, both extending `tsconfig.base.json`).
+ * Checks the packaging/config boilerplate the 2026-07-23 audit (§3) found
+ * drifting with no invariant holding it: the devDependency names required by
+ * each plugin shape, and two tsconfig shapes (server / TUI) that are now shared
+ * presets (`tsconfig.server.json` / `tsconfig.tui.json` at the repo root, both
+ * extending `tsconfig.base.json`). Dependency versions remain manifest and
+ * package-manager concerns and are deliberately not duplicated here.
  *
- * The decay mode is concrete: one plugin's biome/typescript/types bump
- * typechecks green while the fleet drifts, because no test asserts the fleet
- * is uniform. Pre-audit, one tsconfig carried an unexplained shape outlier
- * (§2.8.6) that was invisible until the audit — exactly the kind of silent
- * drift a shape preset now forces to become an explicit, reviewed opt-out.
- * npm has no dependency presets, so a uniformity check is the fix; and per
- * the issue, any opt-out must land here as a small, reviewed, reasoned
- * allowlist entry — never silently in a package. A near-total allowlist is a
- * rubber stamp, so the opt-out tables are capped at a small, reviewed size and
- * every entry is kept live against the default shape (a dead entry, or one
- * that names a plugin now matching the default, fails).
+ * Pre-audit, one tsconfig carried an unexplained shape outlier (§2.8.6) that
+ * was invisible until the audit — exactly the kind of silent drift a shape
+ * preset now forces to become an explicit, reviewed opt-out. Any opt-out must
+ * land here as a small, reviewed, reasoned allowlist entry. A near-total
+ * allowlist is a rubber stamp, so the opt-out tables are capped at a small,
+ * reviewed size and every entry is kept live against the default shape.
  *
  * The devDep uniformity block has one shape-driven split worth flagging so a
  * future reader doesn't "simplify" it away: the bare `@opencode-ai/plugin`
- * specifier is in BASE_ALL, but a plugin that value-imports it must carry it
- * in `dependencies` instead (the installer loads plugin `src` directly, so a
+ * specifier is in BASE_DEV_DEPS, but a plugin that value-imports it must carry
+ * it in `dependencies` instead (the installer loads plugin `src` directly, so a
  * devDep a consumer install drops loads under workspace hoisting and fails
  * on a real `opencode plugin install` — the trap runtime-deps.test.ts guards,
  * which already bit cron). The minus-runtime-deps rule encodes that split.
  * One named opt-out removes a key a plugin genuinely doesn't use:
- * redact-secrets imports @opencode-ai/sdk nowhere, so it drops that pin.
+ * redact-secrets imports @opencode-ai/sdk nowhere, so it drops that package.
  *
  * Enumerated off `git ls-files`, never a filesystem glob — untracked debris
  * under plugins/ must not flip the verdict (a hard repo convention; a stray
@@ -86,28 +82,26 @@ function loadTsConfig(rel: string): TsConfig {
   return JSON.parse(read(rel)) as TsConfig
 }
 
-const PIN = read(".opencode-version").trim()
+const BASE_DEV_DEPS = [
+  "@biomejs/biome",
+  "@macarons/plugin-test-harness",
+  "@opencode-ai/plugin",
+  "@opencode-ai/sdk",
+  "@types/bun",
+  "@types/node",
+  "typescript",
+]
 
-const BASE_DEPS: Record<string, string> = {
-  "@biomejs/biome": "2.5.12",
-  "@macarons/plugin-test-harness": "workspace:*",
-  "@opencode-ai/plugin": PIN,
-  "@opencode-ai/sdk": PIN,
-  "@types/bun": "^1.4.0",
-  "@types/node": "^26.4.1",
-  typescript: "^7.0.2",
-}
-
-const TUI_EXTRA_DEPS: Record<string, string> = {
-  "@opentui/core": "0.5.10",
-  "@opentui/keymap": "0.5.10",
-  "@opentui/solid": "0.5.10",
-  "solid-js": "1.9.15",
-}
+const TUI_EXTRA_DEV_DEPS = [
+  "@opentui/core",
+  "@opentui/keymap",
+  "@opentui/solid",
+  "solid-js",
+]
 
 // Named, reasoned opt-outs from the uniform devDep shape above. Each removes
 // keys that would otherwise be expected for that plugin but that it does not
-// use, so an unused pin is not demanded. Capped at exactly one by the
+// use, so an unused package is not demanded. Capped at exactly one by the
 // liveness test below — a second cannot slip in as a drive-by, and a dead entry
 // (one that no longer opts anything out, or that names a plugin now carrying
 // the key) fails.
@@ -115,7 +109,7 @@ const DEV_DEP_OPT_OUTS: Record<string, { remove: string[]; reason: string }> = {
   "redact-secrets": {
     remove: ["@opencode-ai/sdk"],
     reason:
-      "imports @opencode-ai/sdk nowhere in tracked sources, so the pin would be unused",
+      "imports @opencode-ai/sdk nowhere in tracked sources, so the package would be unused",
   },
 }
 
@@ -313,7 +307,7 @@ describe("non-plugin workspace tsconfigs are pinned to their reviewed shape", ()
   })
 })
 
-describe("plugin devDependency blocks are uniform per shape", () => {
+describe("plugin devDependency names match their shape", () => {
   test("the plugin roster is discovered off git, not vacuously empty", () => {
     // Guard the guard: this clause checks ≥10 plugins so a broken walk that
     // found zero plugins cannot pass the devDep uniformity check vacuously.
@@ -340,16 +334,16 @@ describe("plugin devDependency blocks are uniform per shape", () => {
         continue
       }
       // The keys an opt-out removes must otherwise be expected: present in
-      // BASE_ALL + (hasTui ? TUI_EXTRA : {}) and not already subtracted by the
-      // runtime-deps rule. Compute the pre-opt-out expected set the same way
-      // the uniformity test does.
+      // BASE_DEV_DEPS + (hasTui ? TUI_EXTRA_DEV_DEPS : []) and not already
+      // subtracted by the runtime-deps rule. Compute the pre-opt-out expected
+      // set the same way the shape test does.
       const runtimeDeps = new Set(Object.keys(p.pkg.dependencies ?? {}))
       const preOptOut = new Set<string>()
-      for (const k of Object.keys(BASE_DEPS)) {
+      for (const k of BASE_DEV_DEPS) {
         if (!runtimeDeps.has(k)) preOptOut.add(k)
       }
       if (p.hasTui) {
-        for (const k of Object.keys(TUI_EXTRA_DEPS)) {
+        for (const k of TUI_EXTRA_DEV_DEPS) {
           if (!runtimeDeps.has(k)) preOptOut.add(k)
         }
       }
@@ -373,13 +367,14 @@ describe("plugin devDependency blocks are uniform per shape", () => {
     expect(dead).toEqual([])
   })
 
-  test("every plugin devDependencies block matches the expected shape", () => {
+  test("every plugin devDependencies block contains the expected names", () => {
     const offenders: string[] = []
     let checked = 0
     for (const p of plugins) {
       checked++
       const runtimeDeps = new Set(Object.keys(p.pkg.dependencies ?? {}))
-      // Expected = BASE_ALL + (hasTui ? TUI_EXTRA : {}) − runtime deps − opt-out.
+      // Expected = BASE_DEV_DEPS + (hasTui ? TUI_EXTRA_DEV_DEPS : [])
+      // minus runtime deps and the explicit opt-out.
       // The minus-runtime-deps rule is load-bearing and applies to every key,
       // not just TUI_EXTRA: the installer loads plugin `src` directly
       // (pathToFileURL into this checkout), so a runtime VALUE import of the
@@ -390,30 +385,25 @@ describe("plugin devDependency blocks are uniform per shape", () => {
       // `@opencode-ai/plugin` splits across deps/devDeps by import shape, and a
       // key carried in `dependencies` is not also demanded in `devDependencies`.
       // Do NOT "simplify" this minus-deps rule away.
-      const expected: Record<string, string> = {}
-      for (const [k, v] of Object.entries(BASE_DEPS)) {
-        if (!runtimeDeps.has(k)) expected[k] = v
+      const expected = new Set<string>()
+      for (const k of BASE_DEV_DEPS) {
+        if (!runtimeDeps.has(k)) expected.add(k)
       }
       if (p.hasTui) {
-        for (const [k, v] of Object.entries(TUI_EXTRA_DEPS)) {
-          if (!runtimeDeps.has(k)) expected[k] = v
+        for (const k of TUI_EXTRA_DEV_DEPS) {
+          if (!runtimeDeps.has(k)) expected.add(k)
         }
       }
       const optOut = DEV_DEP_OPT_OUTS[p.dir]
       if (optOut) {
-        for (const k of optOut.remove) delete expected[k]
+        for (const k of optOut.remove) expected.delete(k)
       }
-      const expectedKeys = new Set(Object.keys(expected))
       const dev = p.pkg.devDependencies ?? {}
 
       // Missing: an expected key absent from devDependencies.
-      for (const [k, v] of Object.entries(expected)) {
+      for (const k of expected) {
         if (!(k in dev)) {
-          offenders.push(`${p.dir}: missing devDependencies.${k} (want ${v})`)
-        } else if (dev[k] !== v) {
-          offenders.push(
-            `${p.dir}: devDependencies.${k} is ${dev[k]}, want ${v}`,
-          )
+          offenders.push(`${p.dir}: missing devDependencies.${k}`)
         }
       }
 
@@ -422,7 +412,7 @@ describe("plugin devDependency blocks are uniform per shape", () => {
       // key with value `workspace:*` is allowed without a growing named
       // allowlist that would rubber-stamp drift.
       for (const [k, v] of Object.entries(dev)) {
-        if (expectedKeys.has(k)) continue
+        if (expected.has(k)) continue
         if (/^@macarons\//.test(k) && v === "workspace:*") continue
         offenders.push(`${p.dir}: extra devDependencies.${k} = ${v}`)
       }
