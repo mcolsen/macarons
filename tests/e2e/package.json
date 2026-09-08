@@ -29,7 +29,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.12",
     "@opencode-ai/sdk": "1.18.14",
-    "@types/bun": "^1.4.0",
+    "@types/bun": "^1.4.1",
     "@types/node": "^26.4.1",
     "typescript": "^7.0.2"
   }
