@@ -30,7 +30,7 @@
     "@macarons/plugin-test-harness": "workspace:*",
     "@opencode-ai/plugin": "1.18.14",
     "@opencode-ai/sdk": "1.18.14",
-    "@types/bun": "^1.4.0",
+    "@types/bun": "^1.4.1",
     "@types/node": "^26.4.1",
     "solid-js": "1.9.15",
     "typescript": "^7.0.2"
