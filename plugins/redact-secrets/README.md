@@ -452,13 +452,23 @@ that actually identify a credential, and both are pinned by tests.
   the combined span remain restorable in the live vault.
 - **Fingerprint recovery is bounded and fails closed.** Both candidate passes
   share a limit of 10,000 distinct candidate strings (one HMAC each) per
-  scanned string. An outbound scan needing more aborts before that content is
-  sent; a completed-text safety check that exceeds the limit leaves the entire
-  part's placeholders intact. An unresolved catalog entry survives a restart,
-  so repeatedly replaying a candidate-heavy transcript can repeatedly hit the
-  limit. The protection-preserving recovery is to remove or revert the
-  candidate-heavy content from that session, or start a new session that does
-  not replay it.
+  scanned string. If a string needs more, its **entire outbound value** is
+  replaced with a `[REDACTED-SCAN-LIMIT: …]` explanation. No prefix, suffix, or
+  partially scanned content is forwarded. Other strings continue through the
+  normal scan, and the session can continue. This marker is an omission, not a
+  secret placeholder: it cannot be restored into tool arguments.
+  An affected file part becomes a text explanation; an affected tool attachment
+  is removed with an explanation added to the tool output, so marker text is
+  never sent as an invalid PDF or other media file.
+
+  This can happen with ordinary numeric telemetry when the catalog contains
+  several neighboring secret lengths; it does not mean the output contains
+  10,000 secrets. The original stored transcript is unchanged. Replaying it,
+  including after restarting OpenCode, safely omits an over-budget string
+  again. A warning explains the omission; request smaller output or select only
+  the needed fields if the model needs that information. Restarting alone does
+  not make the omitted content scannable. A completed-text safety check that
+  exceeds the limit still leaves the entire part's placeholders intact.
 
   The catalog is `$XDG_DATA_HOME/opencode/redact-secrets.fingerprints.json`
   when `XDG_DATA_HOME` is set, otherwise
@@ -466,13 +476,10 @@ that actually identify a credential, and both are pinned by tests.
   most the 2,048 most recent entries. Eviction at that bound, external deletion
   or corruption, and simultaneous processes whose final renames race can all
   lose entries. It is therefore a recovery aid, not a durable secret vault or
-  a blanket restart guarantee. If the affected history cannot be changed, the
-  last-resort recovery is to stop all OpenCode processes using that data
-  directory and move the catalog aside, but never remove `redact-secrets.key`:
-  losing a catalog entry can leave a contextless raw value in an older
-  transcript unrecognized after restart and therefore unmasked if ordinary
-  rule detection also misses it. Do not reopen affected old sessions until
-  that content is removed or the needed catalog is restored.
+  a blanket restart guarantee. **Keep the catalog and `redact-secrets.key`**;
+  clearing either is not a remedy for the scan limit. Losing a catalog entry
+  can leave a contextless raw value in an older transcript unrecognized after
+  restart and therefore unmasked if ordinary rule detection also misses it.
 - **The in-memory vault is capped, and the cap fails closed.** Because
   eviction would break the guarantees above (stable placeholders, exact
   re-masking, restoration), the vault never evicts; instead it refuses to
@@ -526,6 +533,28 @@ that actually identify a credential, and both are pinned by tests.
 - Detection is regex-based. A secret with no recognizable shape, keyword
   context, or entropy signature will not be caught. This is a net, not a
   guarantee.
+
+## Redaction warnings and errors
+
+Scan-limit omissions produce a warning toast and a structured `redact-secrets`
+log entry. Diagnostics identify the affected surface and, when available, the
+session, message, part, part type, and built-in tool. They include the string's
+character count and the first over-budget candidate count (10,001, a lower
+bound rather than a full scan of the remainder). Repeated warnings are
+deduplicated so replaying history does not produce a toast every turn.
+
+Other redaction failures still stop the affected operation, with an error
+toast explaining the category and next step. A walker limit calls for smaller
+or less deeply nested content; a vault limit calls for reducing the content
+and restarting OpenCode; wire inspection failures call for a supported,
+inspectable request body. Unexpected failures identify the redaction surface
+for a bug report. These plugin notifications provide context even when
+OpenCode's main error display says only “unexpected server error.” Headless
+users can inspect the structured logs.
+
+Diagnostics contain fixed error categories and filtered metadata, never the
+scanned content or arbitrary exception messages and stacks. Custom tool names
+are reported generically because names themselves can contain sensitive text.
 
 ## Updating the vendored rules
 

@@ -10,9 +10,11 @@ import {
   type OpencodeClient,
 } from "@opencode-ai/sdk/v2"
 import {
+  FINGERPRINT_SCAN_LIMIT_MARKER,
   placeholderFor,
   secretHash,
 } from "../../../plugins/redact-secrets/src/shared"
+import { fingerprintLimitFixture } from "../../../plugins/redact-secrets/test/fingerprint-limit.fixture"
 import { EventRecorder } from "../harness/events"
 import {
   type OpenCodeProcess,
@@ -347,6 +349,134 @@ describe("redact-secrets against a real OpenCode server", () => {
         },
         { description: "restored.txt holds the real secret", timeout: 20_000 },
       )
+    } catch (error) {
+      await writeArtifacts(sandbox, provider, processes)
+      throw error
+    }
+  }, 90_000)
+
+  test("candidate-heavy tool output is omitted and the same session continues after restart", async () => {
+    const sandbox = await createSandbox("redact-secrets-scan-limit")
+    const fixture = fingerprintLimitFixture(E2E_KEY)
+    const provider = createScriptedProvider({
+      commands: ["cat telemetry.json"],
+      finalText: "The health check can continue with smaller output.",
+    })
+    const processes: OpenCodeProcess[] = []
+    const recorders: EventRecorder[] = []
+    cleanups.push(async () => sandbox.cleanup())
+    cleanups.push(async () => provider.close())
+    cleanups.push(async () => {
+      for (const recorder of recorders) await recorder.close()
+    })
+    cleanups.push(async () => {
+      for (const process of processes.reverse()) await process.stop()
+    })
+
+    try {
+      await provider.ready
+      await fs.writeFile(
+        path.join(sandbox.project, "telemetry.json"),
+        fixture.content,
+      )
+      const config = await writeRedactSecretsConfig(
+        sandbox.project,
+        provider.baseURL,
+      )
+      await fs.writeFile(
+        path.join(sandbox.project, "opencode.json"),
+        JSON.stringify({
+          ...config,
+          tool_output: { max_bytes: 65_536, max_lines: 3_000 },
+        }),
+      )
+      const env = await sandbox.environment("redact-secrets-scan-limit")
+      await plantPlaceholderKey(env)
+      // Exercise the universal message transform, independently of fetch wrapping.
+      await writePluginOptions(env, { wireBackstop: false })
+      const dataHome = env.XDG_DATA_HOME
+      if (!dataHome) throw new Error("sandbox omitted XDG_DATA_HOME")
+      const catalogPath = path.join(
+        dataHome,
+        "opencode",
+        "redact-secrets.fingerprints.json",
+      )
+      await fs.writeFile(
+        catalogPath,
+        JSON.stringify({ version: 1, entries: fixture.entries }),
+      )
+      let server = await startOpenCode({ cwd: sandbox.project, env })
+      processes.push(server)
+      let client = clientFor(server, sandbox.project)
+      let events = await EventRecorder.connect(client)
+      recorders.push(events)
+      const session = await createSession(
+        client,
+        sandbox.project,
+        "Telemetry scan-limit recovery",
+      )
+
+      for (let turn = 0; turn < 3; turn++) {
+        if (turn === 2) {
+          await events.close()
+          await server.stop()
+          server = await startOpenCode({ cwd: sandbox.project, env })
+          processes.push(server)
+          client = clientFor(server, sandbox.project)
+          events = await EventRecorder.connect(client)
+          recorders.push(events)
+        }
+        const before = provider.requests.length
+        const mark = events.mark()
+        await prompt(
+          client,
+          sandbox.project,
+          session,
+          turn === 0 ? "Read telemetry.json." : "Continue the health check.",
+        )
+        await events.waitFor(isIdle(session), {
+          after: mark,
+          description: `scan-limit turn ${turn + 1} completed`,
+          timeout: 60_000,
+        })
+        const requests = provider.requests.slice(before)
+        expect(requests.length).toBeGreaterThan(0)
+        expect(JSON.stringify(requests)).toContain(
+          FINGERPRINT_SCAN_LIMIT_MARKER,
+        )
+        expect(JSON.stringify(requests)).not.toContain(fixture.secret)
+        expect(JSON.stringify(requests)).not.toContain(
+          fixture.content.slice(0, 100),
+        )
+        expect(
+          events.events
+            .slice(mark)
+            .some((event) => event.type === "session.error"),
+        ).toBe(false)
+        provider.setCommands([])
+      }
+      const stored = await client.session.messages({
+        directory: sandbox.project,
+        sessionID: session,
+      })
+      expect(stored.error).toBeUndefined()
+      const part = stored.data
+        ?.flatMap((message) => message.parts)
+        .find(
+          (part) =>
+            part.type === "tool" &&
+            part.tool === "bash" &&
+            part.state.status === "completed",
+        )
+      expect(
+        part?.type === "tool" && part.state.status === "completed"
+          ? part.state.output
+          : undefined,
+      ).toBe(fixture.content)
+      // No catalog reset was needed to reopen the affected session.
+      const catalog = JSON.parse(await fs.readFile(catalogPath, "utf8"))
+      for (const entry of fixture.entries)
+        expect(catalog.entries).toContainEqual(entry)
     } catch (error) {
       await writeArtifacts(sandbox, provider, processes)
       throw error
