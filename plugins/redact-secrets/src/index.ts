@@ -23,7 +23,6 @@ import {
   COMPACTION_NOTE,
   catalogWireCandidates,
   ENV_FILE_CANDIDATES,
-  FINGERPRINT_MAX_CANDIDATES,
   type FingerprintEntry,
   FingerprintLimitError,
   HistoryPins,
@@ -404,12 +403,8 @@ export const RedactSecretsPlugin: Plugin = async ({
   serverUrl,
 }) => {
   const log = appLogger(client, SERVICE)
-  const toast = serverToast(client, { directory, title: "Secrets redacted" })
-  const diagnostics = createRedactionDiagnostics({
-    log,
-    toast,
-    candidateLimit: FINGERPRINT_MAX_CANDIDATES,
-  })
+  const toast = serverToast(client, { directory, title: "Secret redaction" })
+  const diagnostics = createRedactionDiagnostics({ log, toast })
 
   const compat = await reportServerCompat({
     client,
@@ -752,7 +747,11 @@ export const RedactSecretsPlugin: Plugin = async ({
   }
 
   let toasted = false
-  const noteRedactions = (count: number, where: string) => {
+  const noteRedactions = (
+    count: number,
+    where: string,
+    omissionsBefore: number,
+  ) => {
     if (count <= 0) return
     log(
       "info",
@@ -760,9 +759,9 @@ export const RedactSecretsPlugin: Plugin = async ({
       { vault: redactor.vaultSize },
     )
     // A scan-limit warning is more actionable than the usual first-redaction
-    // info toast; do not immediately replace it when the same request also
-    // contained an ordinary detected secret.
-    if (toasted || redactor.omissionCount > 0) return
+    // info toast; do not immediately replace it when this operation also
+    // omitted content. Past omissions must not silence future notifications.
+    if (toasted || redactor.omissionCount > omissionsBefore) return
     toasted = true
     // Headless hosts have no TUI; the log line above still tells the story.
     toast("info", "Detected secret values were masked before leaving OpenCode.")
@@ -882,6 +881,7 @@ export const RedactSecretsPlugin: Plugin = async ({
       // Keep the provider's own fetch outside this guard: only inspection is a
       // redaction failure, while transport errors still belong to the caller.
       const redactionsBefore = redactor.redactionCount
+      const omissionsBefore = redactor.omissionCount
       const inspected = await diagnostics.run(
         { hook: "wire.request", surface: "provider request body" },
         redactionFailureCategory,
@@ -889,7 +889,11 @@ export const RedactSecretsPlugin: Plugin = async ({
       )
       const redactions = redactor.redactionCount - redactionsBefore
       if (redactions > 0)
-        noteRedactions(redactions, "a provider request body (wire backstop)")
+        noteRedactions(
+          redactions,
+          "a provider request body (wire backstop)",
+          omissionsBefore,
+        )
       return innerFetch(
         inspected.input as Parameters<typeof fetch>[0],
         inspected.init,
@@ -924,8 +928,13 @@ export const RedactSecretsPlugin: Plugin = async ({
         { hook: "source.redaction", surface: "request sources" },
         redactionFailureCategory,
         () => {
+          const omissionsBefore = redactor.omissionCount
           redactor.noteScanContextCached(JSON.stringify(value))
-          noteRedactions(redactor.redactValueInPlace(value), "request sources")
+          noteRedactions(
+            redactor.redactValueInPlace(value),
+            "request sources",
+            omissionsBefore,
+          )
         },
       )
     },
@@ -960,6 +969,7 @@ export const RedactSecretsPlugin: Plugin = async ({
       // knows. Prompts need nothing here: an agent prompt becomes the child
       // session's system text, which chat.system.transform already redacts.
       const before = redactor.redactionCount
+      const omissionsBefore = redactor.omissionCount
       const agents = Object.entries(cfg.agent ?? {})
       // All agents land in the SAME Task-tool description as "- name:
       // description" lines, so names and descriptions share one keyword gate
@@ -985,7 +995,11 @@ export const RedactSecretsPlugin: Plugin = async ({
           )
         }
       }
-      noteRedactions(redactor.redactionCount - before, "agent descriptions")
+      noteRedactions(
+        redactor.redactionCount - before,
+        "agent descriptions",
+        omissionsBefore,
+      )
 
       if (!options.wireBackstop) return
       const authStore = await readAuthRecord()
@@ -1052,6 +1066,7 @@ export const RedactSecretsPlugin: Plugin = async ({
     // nothing writes them back), so in-place mutation is safe and reaches
     // every provider, transport, and the compaction summarizer.
     "experimental.chat.messages.transform": async (_input, output) => {
+      const omissionsBefore = redactor.omissionCount
       // Keyword gates span the whole outbound request, not one part: the
       // provider reads every part of every message as one document, so a rule
       // keyword in one part ("facebook token follows") must gate rules in a
@@ -1136,7 +1151,7 @@ export const RedactSecretsPlugin: Plugin = async ({
             pins.set(scope as string, key, { output: after, count: applied })
         }
       }
-      noteRedactions(count, "chat messages")
+      noteRedactions(count, "chat messages", omissionsBefore)
     },
 
     "experimental.chat.system.transform": async (input, output) => {
@@ -1205,6 +1220,7 @@ export const RedactSecretsPlugin: Plugin = async ({
     // backstop-excluded providers (README, "Known gaps").
     "tool.definition": async (input, output) => {
       const before = redactor.redactionCount
+      const omissionsBefore = redactor.omissionCount
       const toolID =
         typeof input?.toolID === "string" ? input.toolID : undefined
       // Definitions ride every request alongside the messages, so their
@@ -1309,7 +1325,11 @@ export const RedactSecretsPlugin: Plugin = async ({
           )
         }
       }
-      noteRedactions(redactor.redactionCount - before, "a tool definition")
+      noteRedactions(
+        redactor.redactionCount - before,
+        "a tool definition",
+        omissionsBefore,
+      )
     },
 
     // Ask the summarizer to carry every live placeholder into the summary.

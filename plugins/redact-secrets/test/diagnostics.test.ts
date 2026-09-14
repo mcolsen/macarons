@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
   createRedactionDiagnostics,
+  type DiagnosticContext,
   SCAN_LIMIT_GUIDANCE,
 } from "../src/diagnostics"
 import { FINGERPRINT_MAX_CANDIDATES } from "../src/shared"
@@ -203,22 +204,89 @@ describe("scan-limit diagnostics", () => {
     ])
   })
 
-  test("uses neutral wording when local recovery learning hits the limit", () => {
+  test.each([
+    {
+      hook: "tool.execute.before",
+      surface: "tool arguments",
+      sessionID: "ses_recovery",
+      tool: "bash",
+    },
+    {
+      hook: "experimental.text.complete",
+      surface: "completed text",
+      sessionID: "ses_recovery",
+      messageID: "msg_recovery",
+      partID: "prt_recovery",
+    },
+  ])("recovery learning inherits hook context from $hook", async (context) => {
     const { diagnostics, logs, toasts } = harness()
-    diagnostics.scope(
-      {
-        hook: "tool.execute.before",
-        surface: "recovery sources",
-        sessionID: "ses_recovery",
+    await diagnostics.run(
+      context,
+      () => "UnexpectedError",
+      async () => {
+        // recoverUnknown overrides only the surface inside a diagnostic-wrapped
+        // hook, including after asynchronous local-file reads.
+        await Promise.resolve()
+        diagnostics.scope({ surface: "recovery sources" }, () =>
+          diagnostics.onScanLimit({ characters: 20, candidates: 10_001 }),
+        )
+        diagnostics.onScanLimit({ characters: 20, candidates: 10_001 })
       },
-      () => diagnostics.onScanLimit({ characters: 20, candidates: 10_001 }),
     )
+    expect(logs).toHaveLength(2)
+    expect(toasts).toHaveLength(2)
+    expect(logs[0]?.extra).toMatchObject({
+      ...context,
+      surface: "recovery sources",
+    })
+    expect(logs[1]?.extra).toMatchObject(context)
     expect(logs[0]?.message).toContain("learning local recovery sources")
     expect(logs[0]?.message).toContain("local data was skipped")
     expect(logs[0]?.message).not.toContain("replaced")
     expect(toasts[0]?.message).toContain("local recovery data")
     expect(toasts[0]?.message).not.toContain("leaving OpenCode")
     expect(toasts[0]?.overrides?.duration).toBe(12_000)
+  })
+
+  test("completed-text limits report retained placeholders and dedupe by the usual identities", () => {
+    const { diagnostics, logs, toasts } = harness()
+    const report = (partID: string) =>
+      diagnostics.scope(
+        {
+          hook: "experimental.text.complete",
+          surface: "completed text",
+          sessionID: "ses_complete",
+          messageID: "msg_complete",
+          partID,
+        },
+        () => diagnostics.onScanLimit({ characters: 20, candidates: 10_001 }),
+      )
+    report("prt_complete")
+    report("prt_complete")
+    report("prt_another0")
+    expect(logs).toHaveLength(2)
+    expect(toasts).toHaveLength(1)
+    for (const log of logs) {
+      expect(log.level).toBe("warn")
+      expect(log.message).toContain("restoration was skipped")
+      expect(log.message).toContain("placeholders were retained")
+      expect(log.message).not.toContain("replaced")
+      expect(log.extra).toMatchObject({
+        event: "scan_limit",
+        hook: "experimental.text.complete",
+        surface: "completed text",
+        limit: FINGERPRINT_MAX_CANDIDATES,
+      })
+    }
+    expect(toasts[0]).toEqual({
+      variant: "warning",
+      message:
+        "Secret scanning skipped restoration of candidate-heavy completed text safely; placeholders were retained. The session can continue; re-run with smaller or selective output if needed.",
+      overrides: {
+        title: "Secret redaction",
+        duration: 12_000,
+      },
+    })
   })
 
   test("keeps concurrent async session scopes distinct", async () => {
@@ -280,6 +348,190 @@ describe("scan-limit diagnostics", () => {
 })
 
 describe("fatal redaction diagnostics", () => {
+  test.each([
+    ["session", { sessionID: "ses_another0" }, 2],
+    ["surface", { surface: "completed text" }, 2],
+    ["hook", { hook: "experimental.text.complete" }, 1],
+    ["message", { messageID: "msg_another0" }, 1],
+    ["part", { partID: "prt_another0" }, 1],
+  ] satisfies Array<[string, DiagnosticContext, number]>)(
+    "distinguishes %s in failure logs and uses coarser toast identity",
+    (_field, changed, toastCount) => {
+      const { diagnostics, logs, toasts } = harness()
+      const context = {
+        hook: "experimental.chat.messages.transform",
+        surface: "chat messages",
+        sessionID: "ses_multiple",
+        messageID: "msg_multiple",
+        partID: "prt_multiple",
+      }
+      diagnostics.reportFailure("WalkLimitError", context)
+      diagnostics.reportFailure("WalkLimitError", context)
+      diagnostics.reportFailure("WalkLimitError", { ...context, ...changed })
+      diagnostics.reportFailure("WalkLimitError", { ...context, ...changed })
+      expect(logs.map((log) => log.extra)).toEqual([
+        expect.objectContaining(context),
+        expect.objectContaining({ ...context, ...changed }),
+      ])
+      expect(toasts).toHaveLength(toastCount)
+    },
+  )
+
+  test("different failure categories and scan warnings never suppress each other", () => {
+    const { diagnostics, logs, toasts } = harness()
+    diagnostics.scope(
+      { hook: "source.redaction", surface: "request sources" },
+      () => {
+        for (let replay = 0; replay < 2; replay++) {
+          diagnostics.onScanLimit({ characters: 20, candidates: 10_001 })
+          diagnostics.reportFailure("FingerprintLimitError")
+          diagnostics.reportFailure("VaultLimitError")
+        }
+      },
+    )
+    expect(logs.map((log) => [log.extra?.event, log.extra?.category])).toEqual([
+      ["scan_limit", "FingerprintLimitError"],
+      ["redaction_failure", "FingerprintLimitError"],
+      ["redaction_failure", "VaultLimitError"],
+    ])
+    expect(toasts.map((toast) => toast.variant)).toEqual([
+      "warning",
+      "error",
+      "error",
+    ])
+  })
+
+  test("failure caches evict in insertion order without replay refreshing age", () => {
+    const { diagnostics, logs, toasts } = harness(2)
+    for (const sessionID of [
+      "ses_one00000",
+      "ses_two00000",
+      "ses_one00000", // replay does not refresh the oldest entry
+      "ses_three000",
+      "ses_one00000", // evicted from both caches
+    ]) {
+      diagnostics.reportFailure("VaultLimitError", { sessionID })
+    }
+    expect(logs.map((log) => log.extra?.sessionID)).toEqual([
+      "ses_one00000",
+      "ses_two00000",
+      "ses_three000",
+      "ses_one00000",
+    ])
+    expect(toasts).toHaveLength(4)
+  })
+
+  test("distinct parts evict failure logs independently of toast history", () => {
+    const { diagnostics, logs, toasts } = harness(2)
+    for (const partID of [
+      "prt_one00000",
+      "prt_two00000",
+      "prt_three000",
+      "prt_one00000",
+    ]) {
+      diagnostics.reportFailure("WalkLimitError", {
+        surface: "chat messages",
+        sessionID: "ses_multiple",
+        partID,
+      })
+    }
+    expect(logs).toHaveLength(4)
+    expect(toasts).toHaveLength(1)
+  })
+
+  test("dedupe uses only allowlisted identity and never arbitrary tool names or metadata", () => {
+    const { diagnostics, logs, toasts } = harness()
+    for (const secret of [
+      "first-secret-bearing-field",
+      "second-secret-bearing-field",
+    ]) {
+      diagnostics.reportFailure("UnexpectedError", {
+        hook: secret,
+        surface: secret,
+        sessionID: `ses_${secret}!`,
+        messageID: `msg_${secret}!`,
+        partID: `prt_${secret}!`,
+        partType: secret,
+        tool: secret,
+      })
+    }
+    diagnostics.reportFailure("UnexpectedError", {
+      get sessionID() {
+        throw new Error("secret getter error")
+      },
+      tool: "bash",
+      partType: "tool",
+    })
+    expect(logs).toHaveLength(1)
+    expect(logs[0]?.extra).toEqual({
+      event: "redaction_failure",
+      category: "UnexpectedError",
+      tool: "custom",
+      reason: "Unexpected redaction failure in redaction input.",
+      guidance: "See redact-secrets logs and report a bug.",
+    })
+    expect(toasts).toHaveLength(1)
+    expect(JSON.stringify({ logs, toasts })).not.toContain(
+      "secret-bearing-field",
+    )
+    expect(JSON.stringify({ logs, toasts })).not.toContain(
+      "secret getter error",
+    )
+  })
+
+  test.each(["sync", "async"])(
+    "%s retries still throw their original value when diagnostics are deduped and sinks fail",
+    async (mode) => {
+      let logAttempts = 0
+      let toastAttempts = 0
+      const diagnostics = createRedactionDiagnostics({
+        log: () => {
+          logAttempts++
+          throw new Error("logger failed")
+        },
+        toast: () => {
+          toastAttempts++
+          throw new Error("toast failed")
+        },
+      })
+      const context = {
+        hook: "source.redaction",
+        surface: "request sources",
+      }
+      for (const original of [
+        new Error("first failure"),
+        { retry: "secret" },
+      ]) {
+        let caught: unknown
+        try {
+          if (mode === "sync") {
+            diagnostics.runSync(
+              context,
+              () => "VaultLimitError",
+              () => {
+                throw original
+              },
+            )
+          } else {
+            await diagnostics.run(
+              context,
+              () => "VaultLimitError",
+              async () => {
+                await Promise.resolve()
+                throw original
+              },
+            )
+          }
+        } catch (error) {
+          caught = error
+        }
+        expect(caught).toBe(original)
+      }
+      expect(logAttempts).toBe(1)
+      expect(toastAttempts).toBe(1)
+    },
+  )
+
   test("logs a fixed category and rethrows the same synchronous exception", () => {
     const secret = "exception text could contain a credential"
     const original = new Error(secret)

@@ -1432,7 +1432,12 @@ export class Redactor {
     // No live vault, keyword history, cache, or persistence callback: those
     // would falsely certify contextless values that a restart cannot recover.
     // Even with an unchanged catalog, reusing a prior scan's vault is unsafe.
-    const cold = new Redactor(this.options, this.hashKey)
+    const cold = new Redactor(
+      this.options,
+      this.hashKey,
+      undefined,
+      this.onScanLimit,
+    )
     cold.seedFingerprints(fingerprints)
     return cold.redactString(restored) === content ? restored : content
   }

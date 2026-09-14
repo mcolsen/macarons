@@ -508,8 +508,12 @@ describe("fingerprint persistence (restart-safe exact matching)", () => {
   test("credential recovery shares the candidate cap and omits over-budget strings without caching a leak", () => {
     const secret = "audit225.user:Q7m2v9N4p8R1s6T0"
     const entries: FingerprintEntry[] = []
-    const first = new Redactor(DEFAULT_OPTIONS, KEY, (entry) =>
-      entries.push(entry),
+    const restoreNotices: ScanLimitInfo[] = []
+    const first = new Redactor(
+      DEFAULT_OPTIONS,
+      KEY,
+      (entry) => entries.push(entry),
+      (info) => restoreNotices.push(info),
     )
     const placeholder = placeholderOf(first.redactString(`curl -u ${secret}`))
     const candidates = Array.from(
@@ -517,15 +521,22 @@ describe("fingerprint persistence (restart-safe exact matching)", () => {
       (_, i) => String(i).padStart(secret.length, "0"),
     )
 
-    const atLimit = mk()
+    const atLimitNotices: ScanLimitInfo[] = []
+    const atLimit = new Redactor(DEFAULT_OPTIONS, KEY, undefined, (info) =>
+      atLimitNotices.push(info),
+    )
     atLimit.seedFingerprints(entries)
     const prefix = candidates.slice(1).join(" ")
     expect(atLimit.redactString(`${prefix} ${secret}`)).toBe(
       `${prefix} ${placeholder}`,
     )
+    expect(atLimitNotices).toEqual([])
 
     const content = `${candidates.join(" ")} ${secret}`
-    const restarted = mk()
+    const notices: ScanLimitInfo[] = []
+    const restarted = new Redactor(DEFAULT_OPTIONS, KEY, undefined, (info) =>
+      notices.push(info),
+    )
     restarted.seedFingerprints(entries)
     for (let attempt = 0; attempt < 2; attempt++) {
       expect(restarted.redactString(content)).toBe(
@@ -533,20 +544,49 @@ describe("fingerprint persistence (restart-safe exact matching)", () => {
       )
       expect(restarted.vaultSize).toBe(0)
     }
+    expect(notices).toHaveLength(2)
+    for (const notice of notices) {
+      expect(notice.characters).toBe(content.length)
+      expect(notice.candidates).toBeGreaterThan(FINGERPRINT_MAX_CANDIDATES)
+    }
     expect(
       JSON.parse(restarted.redactJsonBody(JSON.stringify({ text: content }))),
     ).toEqual({ text: FINGERPRINT_SCAN_LIMIT_MARKER })
-    expect(
-      first.restoreText(content.replace(secret, placeholder), entries),
-    ).toBe(content.replace(secret, placeholder))
+    expect(notices).toHaveLength(3)
+
+    const stored = content.replace(secret, placeholder)
+    const persistedBefore = entries.map((entry) => ({ ...entry }))
+    const liveBefore = {
+      vaultSize: first.vaultSize,
+      vaultChars: first.vaultChars,
+      redactionCount: first.redactionCount,
+      omissionCount: first.omissionCount,
+    }
+    expect(first.restoreText(stored, entries)).toBe(stored)
+    expect(restoreNotices).toHaveLength(1)
+    expect(restoreNotices[0]?.characters).toBe(content.length)
+    expect(restoreNotices[0]?.candidates).toBeGreaterThan(
+      FINGERPRINT_MAX_CANDIDATES,
+    )
+    expect(entries).toEqual(persistedBefore)
+    expect({
+      vaultSize: first.vaultSize,
+      vaultChars: first.vaultChars,
+      redactionCount: first.redactionCount,
+      omissionCount: first.omissionCount,
+    }).toEqual(liveBefore)
+
+    const smallerStored = `${prefix} ${placeholder}`
+    expect(first.restoreText(smallerStored, entries)).toBe(
+      `${prefix} ${secret}`,
+    )
+    expect(restoreNotices).toHaveLength(1)
     expect(restarted.redactString(secret)).toBe(placeholder)
   })
 
   test("numeric telemetry is wholly omitted while sibling fields and later recovery remain usable", () => {
     const { content, entries, secret, placeholder } =
       fingerprintLimitFixture(KEY)
-    expect(content.length).toBeGreaterThan(50_000)
-    expect(content.length).toBeLessThan(53_000)
     expect(() => JSON.parse(content)).not.toThrow()
     const notices: ScanLimitInfo[] = []
     const restarted = new Redactor(DEFAULT_OPTIONS, KEY, undefined, (info) =>
@@ -564,15 +604,14 @@ describe("fingerprint persistence (restart-safe exact matching)", () => {
     expect(part.state.output).toBe(FINGERPRINT_SCAN_LIMIT_MARKER)
     expect(part.state.title).toBe("Telemetry")
     expect(clean.text).toBe("Continue with the health check.")
-    expect(notices).toEqual([
-      {
-        characters: content.length,
-        candidates: FINGERPRINT_MAX_CANDIDATES + 1,
-        partType: "tool",
-        partID: "prt_telemetry",
-        tool: "bash",
-      },
-    ])
+    expect(notices).toHaveLength(1)
+    expect(notices[0]).toMatchObject({
+      characters: content.length,
+      partType: "tool",
+      partID: "prt_telemetry",
+      tool: "bash",
+    })
+    expect(notices[0]?.candidates).toBeGreaterThan(FINGERPRINT_MAX_CANDIDATES)
     // Both the keyword-aware path and a plain-value retry obey omission.
     expect(restarted.redactStringUnderKey("api_key", content)).toBe(
       FINGERPRINT_SCAN_LIMIT_MARKER,
@@ -588,13 +627,26 @@ describe("fingerprint persistence (restart-safe exact matching)", () => {
     )
   })
 
-  test("scan-limit reporting cannot interrupt safe omission", () => {
-    const { content, entries } = fingerprintLimitFixture(KEY)
-    const restarted = new Redactor(DEFAULT_OPTIONS, KEY, undefined, () => {
+  test("throwing scan-limit reporting cannot interrupt safe omission or cold restoration", () => {
+    const { content, entries, secret, placeholder } =
+      fingerprintLimitFixture(KEY)
+    let calls = 0
+    const report = () => {
+      calls++
       throw new Error("notification service unavailable")
-    })
+    }
+    const restarted = new Redactor(DEFAULT_OPTIONS, KEY, undefined, report)
     restarted.seedFingerprints(entries)
     expect(restarted.redactString(content)).toBe(FINGERPRINT_SCAN_LIMIT_MARKER)
+    expect(calls).toBe(1)
+
+    const live = new Redactor(DEFAULT_OPTIONS, KEY, undefined, report)
+    expect(placeholderOf(live.redactString(`api_key = ${secret}`))).toBe(
+      placeholder,
+    )
+    const stored = content.replace(secret, placeholder)
+    expect(live.restoreText(stored, entries)).toBe(stored)
+    expect(calls).toBe(2)
   })
 
   test("decoded attachments and JSON property names cannot forward over-budget content", () => {

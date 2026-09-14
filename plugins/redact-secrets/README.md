@@ -542,6 +542,11 @@ session, message, part, part type, and built-in tool. They include the string's
 character count and the first over-budget candidate count (10,001, a lower
 bound rather than a full scan of the remainder). Repeated warnings are
 deduplicated so replaying history does not produce a toast every turn.
+Limits while learning local recovery sources or checking completed text also
+produce warnings. These distinguish skipped local recovery data from a skipped
+text restoration that retains the original placeholders. A scan-limit warning
+takes precedence over the ordinary first-redaction info toast for that operation;
+later operations can still show the first-redaction notice.
 
 Other redaction failures still stop the affected operation, with an error
 toast explaining the category and next step. A walker limit calls for smaller
@@ -551,6 +556,15 @@ inspectable request body. Unexpected failures identify the redaction surface
 for a bug report. These plugin notifications provide context even when
 OpenCode's main error display says only “unexpected server error.” Headless
 users can inspect the structured logs.
+
+Hard-failure diagnostics are deduplicated too: error toasts distinguish the
+session, surface, and failure category; error logs additionally distinguish the
+hook, message, and part. Missing or invalid identifiers share fallback buckets
+(including a global bucket when no session is available). Warning and error
+logs and toasts each use a separate, process-local cache of up to 512 identities.
+Oldest entries are evicted first, after which an event can be reported again.
+Deduplication affects reporting only: every failed retry still stops the
+operation and propagates its original exception.
 
 Diagnostics contain fixed error categories and filtered metadata, never the
 scanned content or arbitrary exception messages and stacks. Custom tool names

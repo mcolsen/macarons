@@ -11,6 +11,9 @@ const SCAN_LIMIT_TOAST =
 const RECOVERY_SCAN_LIMIT_TOAST =
   "Secret scanning skipped candidate-heavy local recovery data safely. The session can continue; use smaller or selective local input if needed."
 
+const COMPLETION_SCAN_LIMIT_TOAST =
+  "Secret scanning skipped restoration of candidate-heavy completed text safely; placeholders were retained. The session can continue; re-run with smaller or selective output if needed."
+
 const SCAN_WARNING_DURATION_MS = 12_000
 const FATAL_ERROR_DURATION_MS = 15_000
 
@@ -227,14 +230,13 @@ export type RedactionDiagnostics = ReturnType<typeof createRedactionDiagnostics>
 export function createRedactionDiagnostics(input: {
   log: AppLogger
   toast: ServerToast
-  candidateLimit?: number
   maxDedupeEntries?: number
 }) {
   const contexts = new AsyncLocalStorage<DiagnosticContext>()
   const loggedScanLimits = new Set<string>()
   const toastedScanLimits = new Set<string>()
-  const candidateLimit =
-    finiteCount(input.candidateLimit) ?? FINGERPRINT_MAX_CANDIDATES
+  const loggedFailures = new Set<string>()
+  const toastedFailures = new Set<string>()
   const maxDedupeEntries = Math.max(
     1,
     finiteCount(input.maxDedupeEntries) ?? 512,
@@ -305,29 +307,34 @@ export function createRedactionDiagnostics(input: {
         characters ?? "unknown-characters",
         candidates ?? "unknown-candidates",
       ].join("\u0000")
-      const recovery = context.surface === "recovery sources"
+      let message =
+        "secret scan limit reached; candidate-heavy content was replaced with a safe marker"
+      let toast = SCAN_LIMIT_TOAST
+      if (context.surface === "recovery sources") {
+        message =
+          "secret scan limit reached while learning local recovery sources; candidate-heavy local data was skipped"
+        toast = RECOVERY_SCAN_LIMIT_TOAST
+      } else if (context.surface === "completed text") {
+        message =
+          "secret scan limit reached while checking completed text; restoration was skipped and placeholders were retained"
+        toast = COMPLETION_SCAN_LIMIT_TOAST
+      }
       if (remember(loggedScanLimits, logKey))
         emitLog(
           "warn",
-          recovery
-            ? "secret scan limit reached while learning local recovery sources; candidate-heavy local data was skipped"
-            : "secret scan limit reached; candidate-heavy content was replaced with a safe marker",
+          message,
           defined({
             event: "scan_limit",
             category: "FingerprintLimitError",
             ...context,
             characters,
             candidates,
-            limit: candidateLimit,
+            limit: FINGERPRINT_MAX_CANDIDATES,
             guidance: SCAN_LIMIT_GUIDANCE,
           }),
         )
       if (remember(toastedScanLimits, toastKey))
-        emitToast(
-          "warning",
-          recovery ? RECOVERY_SCAN_LIMIT_TOAST : SCAN_LIMIT_TOAST,
-          SCAN_WARNING_DURATION_MS,
-        )
+        emitToast("warning", toast, SCAN_WARNING_DURATION_MS)
     } catch {
       // Host-owned values may be adversarial objects. Never let reporting turn
       // a contained scan limit back into a failed request.
@@ -341,18 +348,39 @@ export function createRedactionDiagnostics(input: {
     try {
       const safe = safeContext(mergeContext(contexts.getStore(), context))
       const detail = failureDetail(category, safe.surface ?? "redaction input")
-      emitLog(
-        "error",
-        "secret redaction failed closed; the request was stopped",
-        defined({
-          event: "redaction_failure",
-          category,
-          ...safe,
-          reason: detail.reason,
-          guidance: detail.guidance,
-        }),
-      )
-      emitToast("error", detail.toast, FATAL_ERROR_DURATION_MS)
+      // Replayed failures remain fail-closed, but need not repeat diagnostics.
+      // Logs distinguish session/hook/surface/message/part/category; toasts are
+      // coarser (session/surface/category) so each new part does not interrupt.
+      // Only sanitized identity participates: absent/invalid IDs share fallback
+      // buckets; tool and part type are metadata, never secret-bearing identity.
+      // Each channel has its own FIFO set (default 512), separate from warnings.
+      // Hits do not refresh age; eviction permits reporting again. This records
+      // attempts even if a sink fails, and never suppresses the original throw.
+      const toastKey = [
+        safe.sessionID ?? "global",
+        safe.surface ?? "unknown-surface",
+        category,
+      ].join("\u0000")
+      const logKey = [
+        toastKey,
+        safe.hook ?? "unknown-hook",
+        safe.messageID ?? "unknown-message",
+        safe.partID ?? "unknown-part",
+      ].join("\u0000")
+      if (remember(loggedFailures, logKey))
+        emitLog(
+          "error",
+          "secret redaction failed closed; the request was stopped",
+          defined({
+            event: "redaction_failure",
+            category,
+            ...safe,
+            reason: detail.reason,
+            guidance: detail.guidance,
+          }),
+        )
+      if (remember(toastedFailures, toastKey))
+        emitToast("error", detail.toast, FATAL_ERROR_DURATION_MS)
     } catch {
       // Reporting cannot be allowed to replace the original hook exception.
     }
