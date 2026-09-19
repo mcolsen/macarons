@@ -301,7 +301,7 @@ export type ToastVariant = "info" | "success" | "warning" | "error"
 export type ServerToast = (
   variant: ToastVariant,
   message: string,
-  overrides?: { title?: string; directory?: string },
+  overrides?: { title?: string; directory?: string; duration?: number },
 ) => boolean
 
 /**
@@ -314,7 +314,8 @@ export type ServerToast = (
  * runs under `opencode serve`, in CI, and behind a TUI — so "no toast surface"
  * is the normal case, not an error. `title` defaults per plugin because a
  * toast without one renders as a bare line among every other plugin's; pass
- * `overrides.title`/`overrides.directory` for the odd call that differs.
+ * `overrides.title`/`overrides.directory` for the odd call that differs, or
+ * `overrides.duration` (milliseconds) to keep actionable errors visible longer.
  */
 export function serverToast(
   client: unknown,
@@ -329,7 +330,14 @@ export function serverToast(
     const title = overrides?.title ?? input.title
     try {
       show({
-        body: { ...(title ? { title } : {}), message, variant },
+        body: {
+          ...(title ? { title } : {}),
+          message,
+          variant,
+          ...(overrides?.duration === undefined
+            ? {}
+            : { duration: overrides.duration }),
+        },
         query: { directory: overrides?.directory ?? input.directory },
       }).catch(() => {})
       return true
