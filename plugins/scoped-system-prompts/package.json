@@ -32,7 +32,7 @@
     "@macarons/permission-rules": "workspace:*"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.12",
+    "@biomejs/biome": "2.5.14",
     "@macarons/plugin-test-harness": "workspace:*",
     "@opencode-ai/plugin": "1.18.14",
     "@opencode-ai/sdk": "1.18.14",
