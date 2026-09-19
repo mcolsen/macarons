@@ -20,7 +20,7 @@
     "@macarons/permission-rules": "workspace:*"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.12",
+    "@biomejs/biome": "2.5.14",
     "@opencode-ai/plugin": "1.18.14",
     "@opentui/core": "0.5.10",
     "@opentui/keymap": "0.5.10",

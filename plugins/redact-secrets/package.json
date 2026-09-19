@@ -36,7 +36,7 @@
     "@opencode-ai/plugin": "1.18.14"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.12",
+    "@biomejs/biome": "2.5.14",
     "@macarons/plugin-test-harness": "workspace:*",
     "@types/bun": "^1.4.2",
     "@types/node": "^26.6.1",
