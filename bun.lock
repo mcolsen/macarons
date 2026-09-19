@@ -15,7 +15,7 @@
       "devDependencies": {
         "@biomejs/biome": "2.5.12",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "typescript": "^7.0.2",
       },
     },
@@ -32,7 +32,7 @@
         "@opentui/keymap": "0.5.10",
         "@opentui/solid": "0.5.10",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "solid-js": "1.9.15",
         "typescript": "^7.0.2",
       },
@@ -49,7 +49,7 @@
         "@opencode-ai/plugin": "1.18.14",
         "@opencode-ai/sdk": "1.18.14",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "solid-js": "1.9.15",
         "typescript": "^7.0.2",
       },
@@ -70,7 +70,7 @@
         "@opentui/keymap": "0.5.10",
         "@opentui/solid": "0.5.10",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "solid-js": "1.9.15",
         "typescript": "^7.0.2",
       },
@@ -91,7 +91,7 @@
         "@opentui/keymap": "0.5.10",
         "@opentui/solid": "0.5.10",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "solid-js": "1.9.15",
         "typescript": "^7.0.2",
       },
@@ -111,7 +111,7 @@
         "@opentui/keymap": "0.5.10",
         "@opentui/solid": "0.5.10",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "solid-js": "1.9.15",
         "typescript": "^7.0.2",
       },
@@ -131,7 +131,7 @@
         "@opentui/keymap": "0.5.10",
         "@opentui/solid": "0.5.10",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "solid-js": "1.9.15",
         "typescript": "^7.0.2",
       },
@@ -153,7 +153,7 @@
         "@opentui/keymap": "0.5.10",
         "@opentui/solid": "0.5.10",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "solid-js": "1.9.15",
         "typescript": "^7.0.2",
       },
@@ -171,7 +171,7 @@
         "@macarons/plugin-test-harness": "workspace:*",
         "@opencode-ai/sdk": "1.18.14",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "typescript": "^7.0.2",
       },
     },
@@ -190,7 +190,7 @@
         "@opentui/keymap": "0.5.10",
         "@opentui/solid": "0.5.10",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "solid-js": "1.9.15",
         "typescript": "^7.0.2",
       },
@@ -206,7 +206,7 @@
         "@biomejs/biome": "2.5.12",
         "@macarons/plugin-test-harness": "workspace:*",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "typescript": "^7.0.2",
       },
     },
@@ -222,7 +222,7 @@
         "@opencode-ai/plugin": "1.18.14",
         "@opencode-ai/sdk": "1.18.14",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "typescript": "^7.0.2",
       },
     },
@@ -238,7 +238,7 @@
         "@macarons/plugin-test-harness": "workspace:*",
         "@opencode-ai/sdk": "1.18.14",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "typescript": "^7.0.2",
       },
     },
@@ -257,7 +257,7 @@
         "@opentui/keymap": "0.5.10",
         "@opentui/solid": "0.5.10",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "solid-js": "1.9.15",
         "typescript": "^7.0.2",
       },
@@ -279,7 +279,7 @@
         "@opentui/keymap": "0.5.10",
         "@opentui/solid": "0.5.10",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "solid-js": "1.9.15",
         "typescript": "^7.0.2",
       },
@@ -299,7 +299,7 @@
         "@opentui/keymap": "0.5.10",
         "@opentui/solid": "0.5.10",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "solid-js": "1.9.15",
         "typescript": "^7.0.2",
       },
@@ -311,7 +311,7 @@
         "@biomejs/biome": "2.5.12",
         "@opencode-ai/sdk": "1.18.14",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "typescript": "^7.0.2",
       },
     },
@@ -321,7 +321,7 @@
       "devDependencies": {
         "@biomejs/biome": "2.5.12",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "@typescript/typescript6": "^6.0.2",
         "typescript": "^7.0.2",
       },
@@ -339,7 +339,7 @@
       "devDependencies": {
         "@biomejs/biome": "2.5.12",
         "@types/bun": "^1.4.2",
-        "@types/node": "^26.4.1",
+        "@types/node": "^26.6.1",
         "typescript": "^7.0.2",
       },
     },
@@ -529,7 +529,7 @@
 
     "@types/bun": ["@types/bun@1.4.2", "", { "dependencies": { "bun-types": "1.4.2" } }, "sha512-GimotNn7+ZV0uVArItBbriZsR1oNf0+WTzPkdcFrzShI7k2norL0uzEaJT8T33dWr7O/c9ZDuAFQrctKCi72oQ=="],
 
-    "@types/node": ["@types/node@26.4.1", "", { "dependencies": { "undici-types": "~8.3.0" } }, "sha512-k97ENvZWtvA6yqz5/FS6a7duDgOPEeOQOc2iKS/nY6mX6qJUKtLnWzQS+Xj6tXweyj6ZcTAK2Qecetnvi9nCLA=="],
+    "@types/node": ["@types/node@26.6.1", "", { "dependencies": { "undici-types": "~8.9.0" } }, "sha512-VqGJBMCtdhqkBUCcBLvywI0NJ+KLuVzgNnlBUNFOQjqVxzo2lxLUNg1DSey8+u2u6ktswSAxg+s68QLzWHNOuA=="],
 
     "@typescript/old": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
 
@@ -739,7 +739,7 @@
 
     "unbash": ["unbash@4.0.11", "", {}, "sha512-FoSOKV7NEofQSkAefMVHam4ZPKYMxjAydxiV72UFEDNV/YofxjGfiZ2A9pZjdL/lRJzTjcu4PABo1JYJX8N5iQ=="],
 
-    "undici-types": ["undici-types@8.3.0", "", {}, "sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ=="],
+    "undici-types": ["undici-types@8.9.0", "", {}, "sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg=="],
 
     "update-browserslist-db": ["update-browserslist-db@1.3.2", "", { "dependencies": { "escalade": "^3.2.0", "picocolors": "^1.1.1" }, "peerDependencies": { "browserslist": ">= 4.21.0" }, "bin": { "update-browserslist-db": "cli.js" } }, "sha512-UQ+MSxlhRm1bzjhU+DcuXfjFO1FzNtqhK5+9Yvlp90ItDLk5vT932A0rFu619nf7RVS+Y/VeaUW1jaRDqZ8VJw=="],
 
@@ -757,10 +757,14 @@
 
     "babel-plugin-jsx-dom-expressions/@babel/helper-module-imports": ["@babel/helper-module-imports@7.18.6", "", { "dependencies": { "@babel/types": "^7.18.6" } }, "sha512-0NFvs3VkuSYbFi1x2Vd6tKrywq+z/cLeYC/RJNFrIX/30Bf5aiGYbtvGXolEktzJH8o5E5KJ3tT+nkxuuZFVlA=="],
 
+    "bun-types/@types/node": ["@types/node@26.4.1", "", { "dependencies": { "undici-types": "~8.3.0" } }, "sha512-k97ENvZWtvA6yqz5/FS6a7duDgOPEeOQOc2iKS/nY6mX6qJUKtLnWzQS+Xj6tXweyj6ZcTAK2Qecetnvi9nCLA=="],
+
     "parse5/entities": ["entities@6.0.1", "", {}, "sha512-aN97NXWF6AWBTahfVOIrB/NShkzi5H7F9r1s9mD3cDj4Ko5f2qhhVoYMibXF7GlLveb/D2ioWay8lxI97Ven3g=="],
 
     "path-scurry/lru-cache": ["lru-cache@10.4.3", "", {}, "sha512-JNAzZcXrCt42VGLuYz0zfAzDfAvJWW6AfYlDBQyDV5DClI2m5sAmK+OIO7s59XfsRsWHp02jAJrRadPRGTt6SQ=="],
 
     "path-scurry/minipass": ["minipass@7.1.3", "", {}, "sha512-tEBHqDnIoM/1rXME1zgka9g6Q2lcoCkxHLuc7ODJ5BxbP5d4c2Z5cGgtXAku59200Cx7diuHTOYfSBD8n6mm8A=="],
+
+    "bun-types/@types/node/undici-types": ["undici-types@8.3.0", "", {}, "sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ=="],
   }
 }
