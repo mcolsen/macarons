@@ -13,7 +13,12 @@ import {
   reportServerCompat,
   serverToast,
 } from "@macarons/permission-rules"
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Hooks, Plugin } from "@opencode-ai/plugin"
+import {
+  createRedactionDiagnostics,
+  type DiagnosticContext,
+  type RedactionFailureCategory,
+} from "./diagnostics"
 import {
   COMPACTION_NOTE,
   catalogWireCandidates,
@@ -23,13 +28,16 @@ import {
   HistoryPins,
   hasAuthEntry,
   MAX_RECOVERY_FILE_BYTES,
+  OversizedBodyError,
   PIN_SCOPES,
   parseOptions,
   Redactor,
   redactWireRequest,
   runtimeFlagEnabled,
+  type ScanLimitInfo,
   SYSTEM_NOTE,
   serializeForKeywordSweep,
+  UnscannableBodyError,
   unsafeWireProviders,
   VaultLimitError,
   validFingerprintEntry,
@@ -158,6 +166,28 @@ import {
  */
 
 const SERVICE = "redact-secrets"
+
+function redactionFailureCategory(error: unknown): RedactionFailureCategory {
+  try {
+    if (error instanceof FingerprintLimitError) return "FingerprintLimitError"
+    if (error instanceof OversizedBodyError) return "OversizedBodyError"
+    if (error instanceof UnscannableBodyError) return "UnscannableBodyError"
+    if (error instanceof VaultLimitError) return "VaultLimitError"
+    if (error instanceof WalkLimitError) return "WalkLimitError"
+  } catch {
+    // An arbitrary thrown Proxy can make instanceof itself throw.
+  }
+  return "UnexpectedError"
+}
+
+function messageDiagnosticContext(message: unknown): DiagnosticContext {
+  try {
+    const info = (message as { info?: Record<string, unknown> } | null)?.info
+    return { sessionID: info?.sessionID, messageID: info?.id }
+  } catch {
+    return {}
+  }
+}
 
 /**
  * Clone the wire-visible form of a tool JSON schema that structuredClone
@@ -373,6 +403,8 @@ export const RedactSecretsPlugin: Plugin = async ({
   serverUrl,
 }) => {
   const log = appLogger(client, SERVICE)
+  const toast = serverToast(client, { directory, title: "Secret redaction" })
+  const diagnostics = createRedactionDiagnostics({ log, toast })
 
   const compat = await reportServerCompat({
     client,
@@ -639,6 +671,7 @@ export const RedactSecretsPlugin: Plugin = async ({
       if (!fingerprintTimer)
         fingerprintTimer = setTimeout(() => void persistFingerprints(), 250)
     },
+    (info: ScanLimitInfo) => diagnostics.onScanLimit(info),
   )
   // Per-session record of surfaces this process already sent, so replayed
   // history is never re-redacted under a later rule set (HistoryPins). Lives
@@ -713,16 +746,22 @@ export const RedactSecretsPlugin: Plugin = async ({
     )
   }
 
-  const toast = serverToast(client, { directory, title: "Secrets redacted" })
   let toasted = false
-  const noteRedactions = (count: number, where: string) => {
+  const noteRedactions = (
+    count: number,
+    where: string,
+    omissionsBefore: number,
+  ) => {
     if (count <= 0) return
     log(
       "info",
       `replaced ${count} secret value(s) with placeholders in ${where}`,
       { vault: redactor.vaultSize },
     )
-    if (toasted) return
+    // A scan-limit warning is more actionable than the usual first-redaction
+    // info toast; do not immediately replace it when this operation also
+    // omitted content. Past omissions must not silence future notifications.
+    if (toasted || redactor.omissionCount > omissionsBefore) return
     toasted = true
     // Headless hosts have no TUI; the log line above still tells the story.
     toast("info", "Detected secret values were masked before leaving OpenCode.")
@@ -784,7 +823,9 @@ export const RedactSecretsPlugin: Plugin = async ({
     const envText = Object.entries(process.env)
       .map(([key, value]) => `${key}=${value ?? ""}`)
       .join("\n")
-    redactor.learnFrom(envText)
+    diagnostics.scope({ surface: "recovery sources" }, () =>
+      redactor.learnFrom(envText),
+    )
     for (const name of ENV_FILE_CANDIDATES) {
       const file = join(directory, name)
       try {
@@ -794,7 +835,10 @@ export const RedactSecretsPlugin: Plugin = async ({
         // measure it afterward.
         const info = await stat(file)
         if (!info.isFile() || info.size > MAX_RECOVERY_FILE_BYTES) continue
-        redactor.learnFrom(await readFile(file, "utf8"))
+        const text = await readFile(file, "utf8")
+        diagnostics.scope({ surface: "recovery sources" }, () =>
+          redactor.learnFrom(text),
+        )
       } catch {
         // Missing or unreadable env files are the normal case.
       }
@@ -834,9 +878,22 @@ export const RedactSecretsPlugin: Plugin = async ({
     const innerFetch =
       typeof inner === "function" ? (inner as typeof fetch) : fetch
     return async (input: unknown, init?: RequestInit) => {
-      const inspected = await redactWireRequest(redactor, input, init)
-      if (inspected.redacted)
-        noteRedactions(1, "a provider request body (wire backstop)")
+      // Keep the provider's own fetch outside this guard: only inspection is a
+      // redaction failure, while transport errors still belong to the caller.
+      const redactionsBefore = redactor.redactionCount
+      const omissionsBefore = redactor.omissionCount
+      const inspected = await diagnostics.run(
+        { hook: "wire.request", surface: "provider request body" },
+        redactionFailureCategory,
+        () => redactWireRequest(redactor, input, init),
+      )
+      const redactions = redactor.redactionCount - redactionsBefore
+      if (redactions > 0)
+        noteRedactions(
+          redactions,
+          "a provider request body (wire backstop)",
+          omissionsBefore,
+        )
       return innerFetch(
         inspected.input as Parameters<typeof fetch>[0],
         inspected.init,
@@ -867,26 +924,23 @@ export const RedactSecretsPlugin: Plugin = async ({
   const releaseSourceRedactor = registerSourceRedactor(
     { serverUrl, directory },
     (value) => {
-      try {
-        redactor.noteScanContextCached(JSON.stringify(value))
-        noteRedactions(redactor.redactValueInPlace(value), "request sources")
-      } catch (error) {
-        // Even error names can contain source text; log only known categories.
-        const category =
-          error instanceof WalkLimitError
-            ? "WalkLimitError"
-            : error instanceof VaultLimitError
-              ? "VaultLimitError"
-              : error instanceof FingerprintLimitError
-                ? "FingerprintLimitError"
-                : "unexpected error"
-        log("warn", `source redaction failed (${category})`)
-        throw error
-      }
+      diagnostics.runSync(
+        { hook: "source.redaction", surface: "request sources" },
+        redactionFailureCategory,
+        () => {
+          const omissionsBefore = redactor.omissionCount
+          redactor.noteScanContextCached(JSON.stringify(value))
+          noteRedactions(
+            redactor.redactValueInPlace(value),
+            "request sources",
+            omissionsBefore,
+          )
+        },
+      )
     },
   )
 
-  return {
+  const hooks: Hooks = {
     dispose: async () => {
       releaseSourceRedactor()
     },
@@ -915,6 +969,7 @@ export const RedactSecretsPlugin: Plugin = async ({
       // knows. Prompts need nothing here: an agent prompt becomes the child
       // session's system text, which chat.system.transform already redacts.
       const before = redactor.redactionCount
+      const omissionsBefore = redactor.omissionCount
       const agents = Object.entries(cfg.agent ?? {})
       // All agents land in the SAME Task-tool description as "- name:
       // description" lines, so names and descriptions share one keyword gate
@@ -940,7 +995,11 @@ export const RedactSecretsPlugin: Plugin = async ({
           )
         }
       }
-      noteRedactions(redactor.redactionCount - before, "agent descriptions")
+      noteRedactions(
+        redactor.redactionCount - before,
+        "agent descriptions",
+        omissionsBefore,
+      )
 
       if (!options.wireBackstop) return
       const authStore = await readAuthRecord()
@@ -1007,6 +1066,7 @@ export const RedactSecretsPlugin: Plugin = async ({
     // nothing writes them back), so in-place mutation is safe and reaches
     // every provider, transport, and the compaction summarizer.
     "experimental.chat.messages.transform": async (_input, output) => {
+      const omissionsBefore = redactor.omissionCount
       // Keyword gates span the whole outbound request, not one part: the
       // provider reads every part of every message as one document, so a rule
       // keyword in one part ("facebook token follows") must gate rules in a
@@ -1037,8 +1097,10 @@ export const RedactSecretsPlugin: Plugin = async ({
         // JSON) falls back to per-string keyword gating — and no longer costs
         // the OTHER messages their notes, as the single whole-array stringify
         // did.
-        const serialized = serializeForKeywordSweep(message)
-        if (serialized) redactor.noteScanContextCached(serialized)
+        diagnostics.scope(messageDiagnosticContext(message), () => {
+          const serialized = serializeForKeywordSweep(message)
+          if (serialized) redactor.noteScanContextCached(serialized)
+        })
       }
       // The destination this batch is bound for, and whether pinning applies
       // to it at all. Compaction routes a session's history to a model this
@@ -1078,7 +1140,10 @@ export const RedactSecretsPlugin: Plugin = async ({
             continue
           }
         }
-        const applied = redactor.redactPartsInPlace(message.parts)
+        const applied = diagnostics.scope(
+          messageDiagnosticContext(message),
+          () => redactor.redactPartsInPlace(message.parts),
+        )
         count += applied
         if (key !== undefined) {
           const after = serializeParts(message.parts)
@@ -1086,7 +1151,7 @@ export const RedactSecretsPlugin: Plugin = async ({
             pins.set(scope as string, key, { output: after, count: applied })
         }
       }
-      noteRedactions(count, "chat messages")
+      noteRedactions(count, "chat messages", omissionsBefore)
     },
 
     "experimental.chat.system.transform": async (input, output) => {
@@ -1155,6 +1220,7 @@ export const RedactSecretsPlugin: Plugin = async ({
     // backstop-excluded providers (README, "Known gaps").
     "tool.definition": async (input, output) => {
       const before = redactor.redactionCount
+      const omissionsBefore = redactor.omissionCount
       const toolID =
         typeof input?.toolID === "string" ? input.toolID : undefined
       // Definitions ride every request alongside the messages, so their
@@ -1259,7 +1325,11 @@ export const RedactSecretsPlugin: Plugin = async ({
           )
         }
       }
-      noteRedactions(redactor.redactionCount - before, "a tool definition")
+      noteRedactions(
+        redactor.redactionCount - before,
+        "a tool definition",
+        omissionsBefore,
+      )
     },
 
     // Ask the summarizer to carry every live placeholder into the summary.
@@ -1355,5 +1425,72 @@ export const RedactSecretsPlugin: Plugin = async ({
           log("info", `restored ${count} placeholder(s) in tool arguments`)
       }
     },
+  }
+
+  // Keep the hook bodies readable while applying one uniform fail-closed
+  // reporter around every redaction/restoration entry point. AsyncLocalStorage
+  // carries these scopes into the synchronous onScanLimit callback, including
+  // concurrent requests. Hooks that do no scanning are returned untouched.
+  return {
+    ...hooks,
+    config: async (input) =>
+      diagnostics.run(
+        { hook: "config", surface: "agent descriptions" },
+        redactionFailureCategory,
+        () => hooks.config?.(input),
+      ),
+    "experimental.chat.messages.transform": async (input, output) =>
+      diagnostics.run(
+        {
+          hook: "experimental.chat.messages.transform",
+          surface: "chat messages",
+          sessionID: messageDiagnosticContext(output.messages[0]).sessionID,
+        },
+        redactionFailureCategory,
+        () => hooks["experimental.chat.messages.transform"]?.(input, output),
+      ),
+    "experimental.chat.system.transform": async (input, output) =>
+      diagnostics.run(
+        {
+          hook: "experimental.chat.system.transform",
+          surface: "system prompt",
+          sessionID: input.sessionID,
+        },
+        redactionFailureCategory,
+        () => hooks["experimental.chat.system.transform"]?.(input, output),
+      ),
+    "tool.definition": async (input, output) =>
+      diagnostics.run(
+        {
+          hook: "tool.definition",
+          surface: "tool definition",
+          tool: input.toolID,
+        },
+        redactionFailureCategory,
+        () => hooks["tool.definition"]?.(input, output),
+      ),
+    "experimental.text.complete": async (input, output) =>
+      diagnostics.run(
+        {
+          hook: "experimental.text.complete",
+          surface: "completed text",
+          sessionID: input.sessionID,
+          messageID: input.messageID,
+          partID: input.partID,
+        },
+        redactionFailureCategory,
+        () => hooks["experimental.text.complete"]?.(input, output),
+      ),
+    "tool.execute.before": async (input, output) =>
+      diagnostics.run(
+        {
+          hook: "tool.execute.before",
+          surface: "tool arguments",
+          sessionID: input.sessionID,
+          tool: input.tool,
+        },
+        redactionFailureCategory,
+        () => hooks["tool.execute.before"]?.(input, output),
+      ),
   }
 }

@@ -91,9 +91,18 @@ describe("serverToast", () => {
       directory: "/w",
       title: "Plan handoff",
     })
-    toast("success", "done", { directory: "/other", title: "Elsewhere" })
+    toast("success", "done", {
+      directory: "/other",
+      title: "Elsewhere",
+      duration: 15_000,
+    })
     expect(calls[0]?.input).toEqual({
-      body: { title: "Elsewhere", message: "done", variant: "success" },
+      body: {
+        title: "Elsewhere",
+        message: "done",
+        variant: "success",
+        duration: 15_000,
+      },
       query: { directory: "/other" },
     })
   })

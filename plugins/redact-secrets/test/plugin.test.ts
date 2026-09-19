@@ -18,6 +18,8 @@ import { RedactSecretsPlugin } from "../src/index"
 import {
   COMPACTION_NOTE,
   FINGERPRINT_MAX_CANDIDATES,
+  FINGERPRINT_SCAN_LIMIT_MARKER,
+  type FingerprintEntry,
   FingerprintLimitError,
   MAX_WALK_DEPTH,
   PLACEHOLDER_RE,
@@ -25,9 +27,11 @@ import {
   Redactor,
   SYSTEM_NOTE,
   secretHash,
+  UnscannableBodyError,
   VaultLimitError,
   WalkLimitError,
 } from "../src/shared"
+import { fingerprintLimitFixture } from "./fingerprint-limit.fixture"
 
 const FAKE_PAT = "ghp_x7K2mQ9pL4vN8rT3wY6bJ1hF5dS0aZcE2gUq"
 
@@ -90,11 +94,19 @@ type LogEntry = {
   extra?: Record<string, unknown>
 }
 
+type ToastEntry = {
+  title?: string
+  message: string
+  variant: string
+  duration?: number
+}
+
 type Setup = {
   hooks: Hooks
   root: string
   /** Every app.log the factory emitted during boot. */
   logs: LogEntry[]
+  toasts: ToastEntry[]
   /** Re-run the plugin factory against the same sandbox — a fake "restart". */
   boot: () => Promise<Hooks>
 }
@@ -112,6 +124,8 @@ async function makePlugin(input?: {
   catalog?: unknown
   /** Contents planted as the placeholder key file; defaults to PLUGIN_KEY. */
   keyFile?: string
+  /** Persisted recovery entries available on the first boot. */
+  fingerprints?: readonly FingerprintEntry[]
 }): Promise<Setup> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "redact-secrets-test-"))
   sandboxRoots.push(root)
@@ -128,6 +142,12 @@ async function makePlugin(input?: {
     path.join(dataDir, "redact-secrets.key"),
     input?.keyFile ?? PLUGIN_KEY,
   )
+  if (input?.fingerprints !== undefined) {
+    await fs.writeFile(
+      path.join(dataDir, "redact-secrets.fingerprints.json"),
+      JSON.stringify({ version: 1, entries: input.fingerprints }),
+    )
+  }
   // The plugin derives these exactly as the host does — from the environment.
   // XDG_CACHE_HOME must point into the sandbox even when no catalog fixture
   // is planted, so the developer machine's real models.json never leaks in.
@@ -158,6 +178,7 @@ async function makePlugin(input?: {
   }
 
   const logs: LogEntry[] = []
+  const toasts: ToastEntry[] = []
   const client = {
     global: { health: async () => ({ version: input?.version ?? BAND.floor }) },
     app: {
@@ -166,7 +187,12 @@ async function makePlugin(input?: {
         return {}
       },
     },
-    tui: { showToast: async () => ({}) },
+    tui: {
+      showToast: async (input: { body?: ToastEntry }) => {
+        if (input?.body) toasts.push(input.body)
+        return {}
+      },
+    },
   }
   const boot = async () => {
     const hooks = await RedactSecretsPlugin({
@@ -178,7 +204,7 @@ async function makePlugin(input?: {
     return hooks
   }
   const hooks = await boot()
-  return { hooks, root, logs, boot }
+  return { hooks, root, logs, toasts, boot }
 }
 
 describe("version guard", () => {
@@ -332,23 +358,27 @@ describe("optional source-redaction producer", () => {
     expect(cycle.text).toBe(FAKE_PAT)
     expect(logs).toContainEqual(
       expect.objectContaining({
-        level: "warn",
-        message: "source redaction failed (WalkLimitError)",
+        level: "error",
+        extra: expect.objectContaining({
+          event: "redaction_failure",
+          category: "WalkLimitError",
+          surface: "request sources",
+        }),
       }),
     )
     expect(JSON.stringify(logs)).not.toContain(FAKE_PAT)
   })
 
   test("logs only fixed producer failure categories, never source-bearing error fields", async () => {
-    const { root, logs } = await makePlugin()
     const failures: [unknown, string][] = [
       [new WalkLimitError("depth"), "WalkLimitError"],
       [new VaultLimitError(), "VaultLimitError"],
       [new FingerprintLimitError(), "FingerprintLimitError"],
-      [new Error(), "unexpected error"],
-      [FAKE_PAT, "unexpected error"],
+      [new Error(), "UnexpectedError"],
+      [FAKE_PAT, "UnexpectedError"],
     ]
     for (const [failure, category] of failures) {
+      const { root, logs } = await makePlugin()
       if (failure instanceof Error) {
         failure.message = FAKE_PAT
         failure.cause = new Error(FAKE_PAT)
@@ -371,8 +401,12 @@ describe("optional source-redaction producer", () => {
         ).toThrow(/^Source redaction failed$/)
         expect(logs.slice(before)).toEqual([
           expect.objectContaining({
-            level: "warn",
-            message: `source redaction failed (${category})`,
+            level: "error",
+            extra: expect.objectContaining({
+              event: "redaction_failure",
+              category,
+              surface: "request sources",
+            }),
           }),
         ])
         expect(JSON.stringify(logs)).not.toContain(FAKE_PAT)
@@ -380,6 +414,343 @@ describe("optional source-redaction producer", () => {
         scan.mockRestore()
       }
     }
+  })
+})
+
+describe("redaction diagnostics", () => {
+  test.each([
+    "agent descriptions",
+    "chat messages",
+    "tool definition",
+    "provider request body",
+    "request sources",
+  ] as const)(
+    "%s: an omission suppresses only the current operation's first-redaction toast",
+    async (surface) => {
+      const fixture = fingerprintLimitFixture(PLUGIN_KEY)
+      const setup = await makePlugin({
+        fingerprints: fixture.entries,
+        optionsFile: { wireBackstop: surface === "provider request body" },
+      })
+      const { hooks, root, toasts } = setup
+      const scan = async (texts: string[], sessionID: string) => {
+        switch (surface) {
+          case "agent descriptions": {
+            const config = {
+              agent: Object.fromEntries(
+                texts.map((description, i) => [`agent${i}`, { description }]),
+              ),
+            }
+            await hooks.config?.(config as never)
+            return config
+          }
+          case "chat messages": {
+            const output = {
+              messages: [
+                {
+                  info: { sessionID },
+                  parts: texts.map((text) => ({ type: "text", text })),
+                },
+              ],
+            }
+            await hooks["experimental.chat.messages.transform"]?.(
+              {},
+              output as never,
+            )
+            return output
+          }
+          case "tool definition": {
+            const output = {
+              description: texts[0] ?? "",
+              parameters: {},
+              jsonSchema: { description: texts[1] ?? "" },
+            }
+            await hooks["tool.definition"]?.({ toolID: "bash" }, output)
+            return output
+          }
+          case "provider request body": {
+            const config = {
+              provider: {
+                anthropic: {
+                  options: {
+                    fetch: async (_input: unknown, init?: RequestInit) =>
+                      new Response(String(init?.body)),
+                  },
+                },
+              },
+            }
+            await hooks.config?.(config as never)
+            const response = await config.provider.anthropic.options.fetch(
+              "https://api.anthropic.example/v1/messages",
+              { method: "POST", body: JSON.stringify({ texts }) },
+            )
+            return response.json()
+          }
+          case "request sources":
+            return redactSourceValue(
+              { serverUrl: "http://localhost:1", directory: root },
+              { texts },
+            )
+        }
+      }
+
+      const mixed = JSON.stringify(
+        await scan([fixture.content, FAKE_PAT], "ses_omission"),
+      )
+      expect(mixed).toContain(FINGERPRINT_SCAN_LIMIT_MARKER)
+      expect(mixed).toContain(knownPlaceholder(FAKE_PAT))
+      expect(mixed).not.toContain(fixture.secret)
+      expect(mixed).not.toContain(FAKE_PAT)
+      expect(toasts).toEqual([
+        expect.objectContaining({
+          title: "Secret redaction",
+          variant: "warning",
+          duration: 12_000,
+        }),
+      ])
+
+      // An unrelated later request can still show the first ordinary notice.
+      expect(JSON.stringify(await scan([FAKE_PAT], "ses_followup"))).toContain(
+        knownPlaceholder(FAKE_PAT),
+      )
+      expect(toasts).toHaveLength(2)
+      expect(toasts[1]).toMatchObject({
+        title: "Secret redaction",
+        variant: "info",
+      })
+      await scan([FAKE_PAT], "ses_followup")
+      expect(toasts).toHaveLength(2)
+    },
+  )
+
+  test.each([
+    ["config", "agent descriptions", "redactStringUnderKey"],
+    [
+      "experimental.chat.messages.transform",
+      "chat messages",
+      "redactPartsInPlace",
+    ],
+    ["experimental.chat.system.transform", "system prompt", "redactString"],
+    ["experimental.text.complete", "completed text", "restoreText"],
+    ["tool.execute.before", "tool arguments", "restoreValueInPlace"],
+  ] as const)(
+    "%s reports failures safely, deduplicates retries, and preserves the original exception",
+    async (hook, surface, method) => {
+      const { hooks, logs, toasts } = await makePlugin()
+      const failure =
+        method === "redactPartsInPlace" || method === "restoreValueInPlace"
+          ? new WalkLimitError("depth")
+          : new VaultLimitError()
+      const category = failure.name
+      failure.message = FAKE_PAT
+      failure.cause = new Error(FAKE_PAT)
+      failure.stack = FAKE_PAT
+      const scan = spyOn(Redactor.prototype, method).mockImplementation(() => {
+        throw failure
+      })
+      const sessionID = "ses_failures"
+      const invoke = () => {
+        switch (hook) {
+          case "config":
+            return hooks.config?.({
+              agent: { demo: { description: FAKE_PAT } },
+            } as never)
+          case "experimental.chat.messages.transform":
+            return hooks[hook]?.({}, {
+              messages: [
+                {
+                  info: { sessionID },
+                  parts: [{ type: "text", text: FAKE_PAT }],
+                },
+              ],
+            } as never)
+          case "experimental.chat.system.transform":
+            return hooks[hook]?.({ sessionID } as never, { system: [FAKE_PAT] })
+          case "experimental.text.complete":
+            return hooks[hook]?.(
+              { sessionID, messageID: "msg_failures", partID: "prt_failures" },
+              { text: "A completed response." },
+            )
+          case "tool.execute.before":
+            return hooks[hook]?.(
+              { sessionID, tool: "bash", callID: "call_failures" },
+              { args: { command: "true" } },
+            )
+        }
+      }
+      try {
+        for (let attempt = 0; attempt < 2; attempt++)
+          await expect(Promise.resolve(invoke())).rejects.toBe(failure)
+        const errors = logs.filter(
+          (entry) => entry.extra?.event === "redaction_failure",
+        )
+        expect(errors).toEqual([
+          expect.objectContaining({
+            level: "error",
+            extra: expect.objectContaining({ category, hook, surface }),
+          }),
+        ])
+        if (hook !== "config")
+          expect(errors[0]?.extra?.sessionID).toBe(sessionID)
+        if (hook === "experimental.text.complete")
+          expect(errors[0]?.extra).toMatchObject({
+            messageID: "msg_failures",
+            partID: "prt_failures",
+          })
+        if (hook === "tool.execute.before")
+          expect(errors[0]?.extra?.tool).toBe("bash")
+        expect(toasts).toEqual([
+          expect.objectContaining({
+            title: "Secret redaction",
+            variant: "error",
+            duration: 15_000,
+          }),
+        ])
+        expect(toasts[0]?.message).toContain(surface)
+        expect(JSON.stringify({ logs, toasts })).not.toContain(FAKE_PAT)
+      } finally {
+        scan.mockRestore()
+      }
+    },
+  )
+
+  test("wire inspection failures stop delivery and dedupe without misreporting transport errors", async () => {
+    const { hooks, logs, toasts } = await makePlugin()
+    const transportFailure = new Error(FAKE_PAT)
+    let deliveries = 0
+    const config = {
+      provider: {
+        anthropic: {
+          options: {
+            fetch: async (_input: unknown, _init?: RequestInit) => {
+              deliveries++
+              throw transportFailure
+            },
+          },
+        },
+      },
+    }
+    await hooks.config?.(config as never)
+    const wrapped = config.provider.anthropic.options.fetch
+    for (let attempt = 0; attempt < 2; attempt++)
+      await expect(
+        wrapped("https://api.anthropic.example/v1/messages", {
+          method: "POST",
+          body: new TextEncoder().encode(JSON.stringify({ text: FAKE_PAT })),
+          headers: { "content-type": "application/json; charset=utf-32" },
+        }),
+      ).rejects.toBeInstanceOf(UnscannableBodyError)
+    expect(deliveries).toBe(0)
+    const failures = () =>
+      logs.filter((entry) => entry.extra?.event === "redaction_failure")
+    expect(failures()).toEqual([
+      expect.objectContaining({
+        level: "error",
+        extra: expect.objectContaining({
+          event: "redaction_failure",
+          category: "UnscannableBodyError",
+          hook: "wire.request",
+          surface: "provider request body",
+        }),
+      }),
+    ])
+    expect(toasts).toEqual([
+      expect.objectContaining({ variant: "error", duration: 15_000 }),
+    ])
+
+    await expect(
+      wrapped("https://api.anthropic.example/v1/messages", {
+        method: "POST",
+        body: "{}",
+      }),
+    ).rejects.toBe(transportFailure)
+    expect(deliveries).toBe(1)
+    expect(failures()).toHaveLength(1)
+    expect(toasts).toHaveLength(1)
+    expect(JSON.stringify({ logs, toasts })).not.toContain(FAKE_PAT)
+  })
+
+  test("cold completed-text checks warn while keeping placeholders and allowing smaller restores", async () => {
+    const fixture = fingerprintLimitFixture(PLUGIN_KEY)
+    const { hooks, logs, toasts } = await makePlugin({
+      fingerprints: fixture.entries,
+    })
+    const detected = { type: "text", text: fixture.secret }
+    await hooks["experimental.chat.messages.transform"]?.({}, {
+      messages: [{ info: {}, parts: [detected] }],
+    } as never)
+    expect(detected.text).toBe(fixture.placeholder)
+    logs.length = 0
+    toasts.length = 0
+
+    const input = {
+      sessionID: "ses_completed",
+      messageID: "msg_completed",
+      partID: "prt_completed",
+    }
+    const masked = fixture.content.replace(fixture.secret, fixture.placeholder)
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const output = { text: masked }
+      await hooks["experimental.text.complete"]?.(input, output)
+      expect(output.text).toBe(masked)
+      expect(output.text).not.toContain(FINGERPRINT_SCAN_LIMIT_MARKER)
+      expect(output.text).not.toContain(fixture.secret)
+    }
+    expect(logs).toEqual([
+      expect.objectContaining({
+        level: "warn",
+        extra: expect.objectContaining({
+          event: "scan_limit",
+          hook: "experimental.text.complete",
+          surface: "completed text",
+          ...input,
+          characters: fixture.content.length,
+          limit: FINGERPRINT_MAX_CANDIDATES,
+        }),
+      }),
+    ])
+    expect(toasts).toEqual([
+      expect.objectContaining({ variant: "warning", duration: 12_000 }),
+    ])
+    expect(toasts[0]?.message).toContain("placeholders")
+    expect(JSON.stringify({ logs, toasts })).not.toContain(fixture.secret)
+    expect(JSON.stringify({ logs, toasts })).not.toContain(
+      fixture.content.slice(0, 100),
+    )
+
+    const smaller = { text: fixture.placeholder }
+    await hooks["experimental.text.complete"]?.(input, smaller)
+    expect(smaller.text).toBe(fixture.secret)
+    expect(toasts).toHaveLength(1)
+  })
+
+  test("local recovery diagnostics inherit the real calling hook and session", async () => {
+    const fixture = fingerprintLimitFixture(PLUGIN_KEY)
+    const { hooks, root, logs, toasts } = await makePlugin({
+      fingerprints: fixture.entries,
+    })
+    await fs.writeFile(path.join(root, ".env"), fixture.content)
+    const args = { command: fixture.placeholder }
+    await hooks["tool.execute.before"]?.(
+      { sessionID: "ses_recovery", tool: "bash", callID: "call_recovery" },
+      { args },
+    )
+    expect(args.command).toBe(fixture.placeholder)
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        level: "warn",
+        extra: expect.objectContaining({
+          event: "scan_limit",
+          hook: "tool.execute.before",
+          surface: "recovery sources",
+          sessionID: "ses_recovery",
+          tool: "bash",
+          characters: fixture.content.length,
+        }),
+      }),
+    )
+    expect(toasts.at(-1)?.message).toContain("local recovery")
+    expect(JSON.stringify({ logs, toasts })).not.toContain(fixture.secret)
   })
 })
 
@@ -838,8 +1209,8 @@ describe("outbound redaction hooks", () => {
     ).rejects.toThrow(WalkLimitError)
   })
 
-  test("a pathologically deep schema aborts the request", async () => {
-    const { hooks } = await makePlugin()
+  test("a pathologically deep schema aborts with an actionable, secret-safe error", async () => {
+    const { hooks, logs, toasts } = await makePlugin()
     let deep: Record<string, unknown> = { default: FAKE_PAT }
     for (let i = 0; i < 1100; i++) deep = { properties: deep }
     const output = {
@@ -850,6 +1221,21 @@ describe("outbound redaction hooks", () => {
     await expect(
       hooks["tool.definition"]?.({ toolID: "demo" }, output as never),
     ).rejects.toThrow(WalkLimitError)
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        level: "error",
+        extra: expect.objectContaining({
+          event: "redaction_failure",
+          category: "WalkLimitError",
+          surface: "tool definition",
+          tool: "custom",
+        }),
+      }),
+    )
+    expect(toasts.at(-1)).toMatchObject({ variant: "error", duration: 15_000 })
+    expect(toasts.at(-1)?.message).toContain("tool definition")
+    expect(toasts.at(-1)?.message).toContain("nested")
+    expect(JSON.stringify({ logs, toasts })).not.toContain(FAKE_PAT)
   })
 
   test("a message that cannot be serialized still has its parts redacted, and does not throw (finding)", async () => {
@@ -1062,6 +1448,120 @@ describe("placeholder key persistence", () => {
 })
 
 describe("fingerprint catalog persistence", () => {
+  test("candidate-heavy tool history remains usable on replay and restart without changing stored content", async () => {
+    const setup = await makePlugin()
+    const fixture = fingerprintLimitFixture(PLUGIN_KEY)
+    const catalogPath = path.join(
+      setup.root,
+      "data",
+      "opencode",
+      "redact-secrets.fingerprints.json",
+    )
+    const catalog = JSON.stringify({
+      version: 1,
+      entries: [
+        ...fixture.entries,
+        {
+          hash: secretHash(FAKE_PAT, PLUGIN_KEY),
+          ruleId: "github-pat",
+          length: FAKE_PAT.length,
+        },
+      ],
+    })
+    await fs.writeFile(catalogPath, catalog)
+    const stored = {
+      messages: [
+        {
+          info: {
+            id: "msg_question",
+            sessionID: "ses_telemetry",
+            role: "user",
+            model: { providerID: "openai", modelID: "test" },
+          },
+          parts: [
+            {
+              type: "text",
+              text: `Continue the health check. token = ${FAKE_PAT}`,
+            },
+          ],
+        },
+        {
+          info: {
+            id: "msg_telemetry",
+            sessionID: "ses_telemetry",
+            role: "assistant",
+          },
+          parts: [
+            {
+              id: "prt_telemetry",
+              type: "tool",
+              tool: "bash",
+              state: {
+                status: "completed",
+                output: fixture.content,
+                title: "Telemetry",
+              },
+            },
+          ],
+        },
+      ],
+    }
+    for (let restart = 0; restart < 2; restart++) {
+      const hooks = await setup.boot()
+      const warningsBefore = setup.toasts.filter(
+        (toast) => toast.variant === "warning",
+      ).length
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const output = structuredClone(stored)
+        await hooks["experimental.chat.messages.transform"]?.(
+          {},
+          output as never,
+        )
+        const serialized = JSON.stringify(output)
+        expect(serialized).toContain(FINGERPRINT_SCAN_LIMIT_MARKER)
+        expect(serialized).toContain("Continue the health check.")
+        expect(serialized).not.toContain(fixture.secret)
+        expect(serialized).not.toContain(FAKE_PAT)
+        expect(serialized).not.toContain(fixture.content.slice(0, 100))
+        if (attempt === 0)
+          expect(setup.toasts.at(-1)).toMatchObject({
+            variant: "warning",
+            duration: 12_000,
+          })
+        // First retry has no delivery pin; the next replay does.
+        if (attempt === 1)
+          await hooks.event?.({
+            event: {
+              type: "message.part.updated",
+              properties: {
+                part: { type: "step-start", sessionID: "ses_telemetry" },
+              },
+            },
+          } as never)
+      }
+      expect(
+        setup.toasts.filter((toast) => toast.variant === "warning").length,
+      ).toBe(warningsBefore + 1)
+      // Completion is the persistence barrier, even if future fixture changes
+      // register a new fingerprint and schedule a debounced write.
+      await hooks["experimental.text.complete"]?.({} as never, { text: "" })
+    }
+    const storedPart = stored.messages[1]?.parts[0]
+    expect(
+      storedPart && "state" in storedPart ? storedPart.state.output : undefined,
+    ).toBe(fixture.content)
+    expect(await fs.readFile(catalogPath, "utf8")).toBe(catalog)
+    const diagnostics = JSON.stringify({
+      logs: setup.logs,
+      toasts: setup.toasts,
+    })
+    expect(diagnostics).not.toContain(fixture.secret)
+    expect(diagnostics).not.toContain(fixture.content.slice(0, 100))
+    expect(diagnostics).toContain(String(fixture.content.length))
+    expect(diagnostics).toContain("prt_telemetry")
+    expect(diagnostics).toContain("bash")
+  })
+
   // Context-gated: only the field name ever detects it by rule, so its bare
   // form is exactly the restored-prose shape the catalog exists for.
   const GENERIC = "x7k2mq9pl4vn8rt3wy6bj1hf5ds0azce"
@@ -1232,12 +1732,12 @@ describe("fingerprint catalog persistence", () => {
       ],
     })
 
-    // A cap breach must stay fail-closed. In particular, it must not enter a
-    // clean-result cache: the identical retry still rejects before inner fetch.
+    // A cap breach must stay fail-closed while preserving availability: both
+    // attempts reach the provider with only the offending string omitted.
     const capped = await setup.boot()
-    let innerCalls = 0
-    const innerAtCap = async (_input: unknown, _init?: RequestInit) => {
-      innerCalls++
+    const cappedBodies: string[] = []
+    const innerAtCap = async (_input: unknown, init?: RequestInit) => {
+      cappedBodies.push(String(init?.body))
       return new Response("{}")
     }
     const cappedConfig = {
@@ -1266,9 +1766,41 @@ describe("fingerprint catalog persistence", () => {
         body: overfullBody,
         headers: { "content-type": "application/json" },
       })
-    await expect(sendOverfull()).rejects.toBeInstanceOf(FingerprintLimitError)
-    await expect(sendOverfull()).rejects.toBeInstanceOf(FingerprintLimitError)
-    expect(innerCalls).toBe(0)
+    const logsBefore = setup.logs.length
+    const toastsBefore = setup.toasts.length
+    expect((await sendOverfull()).ok).toBe(true)
+    expect((await sendOverfull()).ok).toBe(true)
+    expect(cappedBodies).toHaveLength(2)
+    for (const body of cappedBodies) {
+      expect(JSON.parse(body)).toEqual({
+        messages: [{ role: "user", content: FINGERPRINT_SCAN_LIMIT_MARKER }],
+      })
+      expect(body).not.toContain(SIMPLE_CURL_AUTH)
+    }
+    const wireLogs = setup.logs.slice(logsBefore)
+    const wireToasts = setup.toasts.slice(toastsBefore)
+    expect(wireLogs).toEqual([
+      expect.objectContaining({
+        level: "warn",
+        extra: expect.objectContaining({
+          event: "scan_limit",
+          category: "FingerprintLimitError",
+          hook: "wire.request",
+          surface: "provider request body",
+          characters: [...decoys, SIMPLE_CURL_AUTH].join(" ").length,
+          limit: FINGERPRINT_MAX_CANDIDATES,
+        }),
+      }),
+    ])
+    expect(wireLogs[0]?.extra?.candidates).toBeGreaterThan(
+      FINGERPRINT_MAX_CANDIDATES,
+    )
+    expect(wireToasts).toEqual([
+      expect.objectContaining({ variant: "warning", duration: 12_000 }),
+    ])
+    const diagnosticText = JSON.stringify({ wireLogs, wireToasts })
+    expect(diagnosticText).not.toContain(SIMPLE_CURL_AUTH)
+    expect(diagnosticText).not.toContain(overfullBody.slice(0, 100))
   })
 
   test("a quoted curl auth pair remains restorable in process and safe across a summary restart", async () => {

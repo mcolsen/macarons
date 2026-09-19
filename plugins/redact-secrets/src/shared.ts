@@ -454,14 +454,26 @@ const FINGERPRINT_RUN_SLACK = 4
 /** Hard cap on HMAC candidates tested per scanned string (DoS bound). */
 export const FINGERPRINT_MAX_CANDIDATES = 10_000
 
-/** A recovery scan exhausted its budget; callers must fail closed. */
+/** Whole-string omission, deliberately distinct from a restorable secret. */
+export const FINGERPRINT_SCAN_LIMIT_MARKER =
+  "[REDACTED-SCAN-LIMIT: redact-secrets omitted this entire string because fingerprint recovery reached its scan limit. Request smaller or more selective output if needed.]"
+
+/** No scanned text is included. Host metadata must be filtered before logging. */
+export type ScanLimitInfo = {
+  characters: number
+  candidates: number
+  partType?: unknown
+  partID?: unknown
+  tool?: unknown
+}
+
+/** Internal recovery signal; outbound string scans contain it by omission. */
 export class FingerprintLimitError extends Error {
   constructor() {
     super(
       `fingerprint recovery exceeded ${FINGERPRINT_MAX_CANDIDATES} distinct candidate strings in one scanned string; ` +
-        "reduce or stop replaying the candidate-heavy content (start a new session if it is in history). " +
-        "Do not clear redact-secrets.fingerprints.json unless necessary: doing so can leave contextless secrets " +
-        "in stored transcripts unrecognized after restart; see the plugin README for recovery",
+        "omit the entire string rather than forwarding partially scanned content. " +
+        "Request smaller or more selective output if needed; keep the fingerprint catalog and installation key",
     )
     this.name = "FingerprintLimitError"
   }
@@ -926,6 +938,12 @@ export class Redactor {
   private readonly scanOptions: ScanOptions
   /** Total placeholder substitutions performed over this instance's lifetime. */
   redactionCount = 0
+  /** Whole-string scan-limit omissions, counted separately from detected secrets. */
+  omissionCount = 0
+  /** Present only during the synchronous part walk, including attachments. */
+  private scannedPart: Record<string, unknown> | undefined
+  /** Aliases of an omitted file must not reintroduce its now-invalid media. */
+  private readonly omittedFiles = new WeakSet<object>()
 
   constructor(
     private readonly options: RedactOptions = DEFAULT_OPTIONS,
@@ -937,6 +955,8 @@ export class Redactor {
      * that seeds the next process (seedFingerprints). Must not throw.
      */
     private readonly onRegister?: (entry: FingerprintEntry) => void,
+    /** Best-effort diagnostics for whole-string omissions; never receives text. */
+    private readonly onScanLimit?: (info: ScanLimitInfo) => void,
   ) {
     this.scanOptions = {
       disabledRules: options.disabledRules,
@@ -1142,8 +1162,8 @@ export class Redactor {
    * its keyed fingerprint survives on disk. Candidates come from token and
    * credential runs, allowing FINGERPRINT_RUN_SLACK for glued punctuation.
    * Both passes share one deduplicated HMAC budget; only an exact keyed hash
-   * match registers a value. Exhaustion aborts the request, since silently
-   * skipping recovery could forward (and cache) a restored credential raw.
+   * match registers a value. Exhaustion signals the caller to omit the WHOLE
+   * string, since a partial result could forward a restored credential raw.
    */
   private recoverFingerprints(content: string): void {
     if (
@@ -1173,6 +1193,37 @@ export class Redactor {
           }
         }
       }
+    }
+  }
+
+  /**
+   * The per-string availability boundary: only a known recovery-budget trip
+   * can degrade to omission. Never return a scanned prefix or cache a partial
+   * result — the unexamined suffix may contain a contextless secret. Other
+   * failures still abort. A cold restore check sees the marker as a mismatch
+   * and keeps the original placeholders rather than persisting raw prose.
+   */
+  private recoverWithinBudget(content: string): boolean {
+    try {
+      this.recoverFingerprints(content)
+      return true
+    } catch (error) {
+      if (!(error instanceof FingerprintLimitError)) throw error
+      this.omissionCount++
+      try {
+        this.onScanLimit?.({
+          characters: content.length,
+          // We stopped before hashing the first over-budget candidate. This
+          // is a lower bound on candidates, not a count of the unscanned tail.
+          candidates: FINGERPRINT_MAX_CANDIDATES + 1,
+          partType: this.scannedPart?.type,
+          partID: this.scannedPart?.id,
+          tool: this.scannedPart?.tool,
+        })
+      } catch {
+        // Notification failures must not turn safe omission into a session trap.
+      }
+      return false
     }
   }
 
@@ -1268,7 +1319,7 @@ export class Redactor {
 
     // Restart recovery first (it can only add vault entries the sweeps below
     // then honor), then rule findings unioned with exact-match vault findings.
-    this.recoverFingerprints(content)
+    if (!this.recoverWithinBudget(content)) return FINGERPRINT_SCAN_LIMIT_MARKER
     const vaultSizeBefore = this.bySecret.size
     const findings = [
       ...scanContent(content, this.scanOptions),
@@ -1338,7 +1389,7 @@ export class Redactor {
     // Same union as redactString: restart recovery, rule findings, and
     // exact-match vault findings (the keyed prefix passes below need neither —
     // a vault hit inside the value is already covered by the plain sweep).
-    this.recoverFingerprints(value)
+    if (!this.recoverWithinBudget(value)) return FINGERPRINT_SCAN_LIMIT_MARKER
     const vaultSizeBefore = this.bySecret.size
     const findings: Finding[] = [
       ...scanContent(value, this.scanOptions),
@@ -1381,14 +1432,14 @@ export class Redactor {
     // No live vault, keyword history, cache, or persistence callback: those
     // would falsely certify contextless values that a restart cannot recover.
     // Even with an unchanged catalog, reusing a prior scan's vault is unsafe.
-    const cold = new Redactor(this.options, this.hashKey)
+    const cold = new Redactor(
+      this.options,
+      this.hashKey,
+      undefined,
+      this.onScanLimit,
+    )
     cold.seedFingerprints(fingerprints)
-    try {
-      return cold.redactString(restored) === content ? restored : content
-    } catch (error) {
-      if (error instanceof FingerprintLimitError) return content
-      throw error
-    }
+    return cold.redactString(restored) === content ? restored : content
   }
 
   /**
@@ -1587,17 +1638,57 @@ export class Redactor {
       // already walked; the re-walk's exact-match sweep catches it.
       for (let pass = 0; pass < 3; pass++) {
         const vaultBefore = this.bySecret.size
-        for (const part of parts) this.redactPart(part, 0, guard)
+        for (const part of parts) {
+          if (!this.redactPart(part, 0, guard)) continue
+          // A whole omitted document is no longer valid media. Preserve the
+          // part's identity, but send the explanation as ordinary text rather
+          // than a PDF/image whose decoded bytes are now just a marker.
+          const record = part as Record<string, unknown>
+          for (const key of Object.keys(record)) {
+            if (key !== "id" && key !== "sessionID" && key !== "messageID")
+              delete record[key]
+          }
+          record.type = "text"
+          record.text = FINGERPRINT_SCAN_LIMIT_MARKER
+        }
         if (this.bySecret.size === vaultBefore) break
       }
     }
     return this.redactionCount - before
   }
 
-  private redactPart(part: unknown, depth: number, guard: WalkGuard): void {
+  /** Returns true when an entire FilePart must be omitted by its container. */
+  private redactPart(part: unknown, depth: number, guard: WalkGuard): boolean {
     this.checkWalkLimits(depth, guard)
-    if (!part || typeof part !== "object" || Array.isArray(part)) return
+    if (!part || typeof part !== "object" || Array.isArray(part)) return false
     const record = part as Record<string, unknown>
+    // Unlike a successful scan, omission is context-independent. A second
+    // reference must be omitted too, even though its payload is already masked
+    // and rescanning it would no longer increment omissionCount.
+    if (this.omittedFiles.has(record)) return true
+    const previous = this.scannedPart
+    const omissionsBefore = this.omissionCount
+    this.scannedPart = {
+      type: record.type,
+      id: record.id,
+      tool: record.tool ?? previous?.tool,
+    }
+    try {
+      this.redactPartFields(record, depth, guard)
+      const omitted =
+        record.type === "file" && this.omissionCount > omissionsBefore
+      if (omitted) this.omittedFiles.add(record)
+      return omitted
+    } finally {
+      this.scannedPart = previous
+    }
+  }
+
+  private redactPartFields(
+    record: Record<string, unknown>,
+    depth: number,
+    guard: WalkGuard,
+  ): void {
     for (const key of Object.keys(record)) {
       // Every key is a traversed child: its value is either scanned inline
       // right here (a url, a plain string) or charged again on entry by the
@@ -1875,6 +1966,7 @@ export class Redactor {
     guard: WalkGuard,
   ): void {
     this.checkWalkLimits(depth, guard)
+    let omittedAttachment = false
     for (const key of Object.keys(state)) {
       // Every key is a traversed child — same accounting as redactPart.
       this.chargeVisit(guard)
@@ -1887,13 +1979,27 @@ export class Redactor {
       if (key === "status") continue
       const value = state[key]
       if (key === "attachments" && Array.isArray(value)) {
-        for (const attachment of value)
-          this.redactPart(attachment, depth + 1, guard)
+        let retained = 0
+        for (const attachment of value) {
+          if (this.redactPart(attachment, depth + 1, guard))
+            omittedAttachment = true
+          else value[retained++] = attachment
+        }
+        value.length = retained
       } else if (typeof value === "string") {
         state[key] = this.redactStringUnderKey(key, value)
       } else {
         this.redactWalk(value, [key], depth + 1, guard)
       }
+    }
+    if (omittedAttachment) {
+      // Attachments must stay FilePart[], so explain omissions in the tool's
+      // already-scanned output instead of inserting an invalid media/text item.
+      const output = typeof state.output === "string" ? state.output : ""
+      if (!output.includes(FINGERPRINT_SCAN_LIMIT_MARKER))
+        state.output = output
+          ? `${output}\n\n${FINGERPRINT_SCAN_LIMIT_MARKER}`
+          : FINGERPRINT_SCAN_LIMIT_MARKER
     }
   }
 
@@ -2037,8 +2143,11 @@ export class Redactor {
     // side-channel bodies this backstop uniquely covers (a title request, a
     // tool-definition set) are small.
     this.noteScanContext(body)
+    const omissionsBefore = this.omissionCount
     const count = this.redactValueInPlace(parsed)
-    return count > 0 ? JSON.stringify(parsed) : body
+    return count > 0 || this.omissionCount > omissionsBefore
+      ? JSON.stringify(parsed)
+      : body
   }
 }
 
