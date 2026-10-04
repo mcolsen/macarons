@@ -654,6 +654,295 @@ describe("OpenCode runtime compatibility guard", () => {
   })
 })
 
+describe("Jev native classifier integration", () => {
+  let previousApiKey: string | undefined
+  let previousAuth: string | undefined
+
+  beforeEach(async () => {
+    previousApiKey = process.env.TYPESAFE_API_KEY
+    previousAuth = process.env.OPENCODE_AUTH_CONTENT
+    process.env.TYPESAFE_API_KEY = "test-jev-server-key"
+    process.env.OPENCODE_AUTH_CONTENT = "{}"
+    await writeGlobalEntry({ model: "typesafe/jev" })
+  })
+
+  afterEach(() => {
+    if (previousApiKey === undefined) delete process.env.TYPESAFE_API_KEY
+    else process.env.TYPESAFE_API_KEY = previousApiKey
+    if (previousAuth === undefined) delete process.env.OPENCODE_AUTH_CONTENT
+    else process.env.OPENCODE_AUTH_CONTENT = previousAuth
+  })
+
+  function jevVerdict(
+    risk: "low" | "medium" | "high" | "critical" = "low",
+    authorization: "none" | "implied" | "clear" = "implied",
+  ) {
+    const choice = (selected: string, choices: string[]) => ({
+      type: "choice",
+      choice: selected,
+      confidence: 1,
+      probabilities: Object.fromEntries(
+        choices.map((value) => [value, value === selected ? 1 : 0]),
+      ),
+    })
+    return {
+      answers: {
+        risk: choice(risk, ["low", "medium", "high", "critical"]),
+        authorization: choice(authorization, ["none", "implied", "clear"]),
+        decision: choice("approve", ["approve", "surface"]),
+      },
+    }
+  }
+
+  function mockJevApi(
+    response: () => Response | Promise<Response> = () =>
+      Response.json(jevVerdict()),
+  ) {
+    const host = mockClassifierApi()
+    const hostFetch = globalThis.fetch
+    const calls: FetchCall[] = []
+    globalThis.fetch = (async (input: any, init?: RequestInit) => {
+      const url = new URL(
+        typeof input === "string" || input instanceof URL
+          ? String(input)
+          : input.url,
+      )
+      if (url.origin === "https://api.typesafe.ai") {
+        calls.push({
+          method: init?.method ?? "GET",
+          pathname: url.pathname,
+          body:
+            typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+        })
+        return response()
+      }
+      // All other requests go to the host mock, never the network.
+      return hostFetch(input, init)
+    }) as typeof fetch
+    return { host, calls }
+  }
+
+  test("a pin absent from the host catalog approves once with redacted state and no chat session", async () => {
+    const api = mockJevApi()
+    const { client, replies, logs } = makeClient({ providers: [] })
+    const hooks = await load(client)
+    await trackModel(hooks)
+    const secret = `ghp_${"A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"}`
+    const redactor = new Redactor(DEFAULT_OPTIONS, "jev-test-installation-key")
+    const release = registerSourceRedactor(
+      { directory: root, serverUrl: "http://127.0.0.1:14096" },
+      (snapshot) => {
+        redactor.noteScanContextCached(JSON.stringify(snapshot))
+        redactor.redactValueInPlace(snapshot)
+      },
+    )
+    try {
+      const request = asked({ metadata: { description: `check ${secret}` } })
+      await hooks.event?.(request)
+      await hooks.event?.(request) // Redelivery must not classify or reply twice.
+
+      expect(replies).toHaveLength(1)
+      expect(replies[0]).toMatchObject({
+        path: { id: "ses_1", permissionID: "per_1" },
+        body: { response: "once" },
+      })
+      expect(api.calls).toHaveLength(1)
+      expect(api.calls[0]).toMatchObject({
+        method: "POST",
+        pathname: "/v1/systemone",
+        body: { model: "jev-latest" },
+      })
+      const state = api.calls[0]!.body.state
+      expect(typeof state).toBe("string")
+      expect(state).toContain("tool: bash")
+      expect(state).toContain("git status --short")
+      expect(state).toContain("Run the linter and fix warnings")
+      expect(state).toContain("[REDACTED-SECRET:")
+      expect(state).not.toContain(secret)
+      expect(api.host.sessions()).toHaveLength(0)
+      expect(api.host.messages()).toHaveLength(0)
+      expect(
+        logs.some((entry) =>
+          String(entry.body.message).includes(
+            "Jev assessed low risk and implied authorization",
+          ),
+        ),
+      ).toBe(true)
+    } finally {
+      release()
+    }
+  })
+
+  test("the policy matrix overrides unsafe approve choices but permits high risk with clear authorization", async () => {
+    let verdict = jevVerdict()
+    const api = mockJevApi(() => Response.json(verdict))
+    const { client, replies, logs } = makeClient()
+    const hooks = await load(client)
+    const cases = [
+      { risk: "high", authorization: "none", approve: false },
+      { risk: "high", authorization: "implied", approve: false },
+      { risk: "critical", authorization: "clear", approve: false },
+      { risk: "high", authorization: "clear", approve: true },
+    ] as const
+    for (const [index, entry] of cases.entries()) {
+      // Separate roots keep a surfaced prompt from parking the next verdict.
+      const sessionID = `ses_matrix_${index}`
+      const id = `per_matrix_${index}`
+      await trackModel(hooks, sessionID)
+      verdict = jevVerdict(entry.risk, entry.authorization)
+      await hooks.event?.(asked({ id, sessionID }))
+      expect(api.calls).toHaveLength(index + 1)
+      expect(replies.some((reply) => reply.path.permissionID === id)).toBe(
+        entry.approve,
+      )
+    }
+    expect(replies).toHaveLength(1)
+    expect(replies[0].body).toEqual({ response: "once" })
+    expect(
+      logs.filter((entry) =>
+        String(entry.body.message).includes(
+          "model decision overridden by policy",
+        ),
+      ),
+    ).toHaveLength(3)
+    expect(api.host.sessions()).toHaveLength(0)
+  })
+
+  test("an explicit ask carve-out prevents a native call", async () => {
+    const api = mockJevApi()
+    const { client, replies, toasts } = makeClient({
+      config: { permission: { bash: { "*": "allow", "git status *": "ask" } } },
+    })
+    const hooks = await load(client)
+    await trackModel(hooks)
+    await hooks.event?.(asked())
+
+    expect(api.calls).toHaveLength(0)
+    expect(api.host.sessions()).toHaveLength(0)
+    expect(replies).toHaveLength(0)
+    expect(toasts).toHaveLength(0)
+  })
+
+  test("an unsupported variant leaves the prompt even when the host advertises it", async () => {
+    await writeGlobalEntry({ model: "typesafe/jev", variant: "high" })
+    const api = mockJevApi()
+    const { client, replies, logs } = makeClient({
+      providers: [
+        { id: "typesafe", models: { jev: { variants: { high: {} } } } },
+      ],
+    })
+    const hooks = await load(client)
+    await trackModel(hooks)
+    await hooks.event?.(asked())
+
+    expect(api.calls).toHaveLength(0)
+    expect(api.host.sessions()).toHaveLength(0)
+    expect(replies).toHaveLength(0)
+    expect(
+      logs.some((entry) =>
+        String(entry.body.message).includes('has no "high" variant'),
+      ),
+    ).toBe(true)
+  })
+
+  test("the separate judge receives tool names without historical tool titles", async () => {
+    const title =
+      "curl -H 'Authorization: Bearer private-history' internal.example"
+    const api = mockJevApi()
+    const { client, replies } = makeClient({
+      messages: {
+        ses_1: [
+          {
+            info: { role: "user", agent: "build" },
+            parts: [{ type: "text", text: "Check the working tree" }],
+          },
+          {
+            info: { role: "assistant" },
+            parts: [{ type: "tool", tool: "bash", state: { title } }],
+          },
+        ],
+      },
+    })
+    const hooks = await load(client)
+    await trackModel(hooks)
+    await hooks.event?.(asked())
+
+    expect(replies).toHaveLength(1)
+    expect(api.calls).toHaveLength(1)
+    const state = api.calls[0]!.body.state
+    expect(state).toContain("Check the working tree")
+    expect(state).toContain("git status --short")
+    expect(state).toContain("- bash")
+    expect(state).not.toContain("- bash:")
+    expect(state).not.toContain("private-history")
+    expect(state).not.toContain("internal.example")
+    expect(api.host.sessions()).toHaveLength(0)
+  })
+
+  test("a root-session pin routes natively and changing it invalidates an in-flight approval", async () => {
+    await writeGlobalEntry({ model: "e2e/other", variant: "high" })
+    const file = sessionModelFile(sessionModelsDir(), "ses_1")
+    await writeSessionModel(file, {
+      version: 1,
+      rootSessionID: "ses_1",
+      revision: "rev-jev",
+      mode: "override",
+      model: "typesafe/jev",
+      variant: null,
+    })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const api = mockJevApi(async () => {
+      await gate
+      return Response.json(jevVerdict())
+    })
+    const { client, replies, logs } = makeClient()
+    const hooks = await load(client)
+    await trackModel(hooks)
+    const pending = hooks.event?.(asked())
+    try {
+      await waitFor(() => api.calls.length === 1)
+      expect(api.host.sessions()).toHaveLength(0)
+      expect(replies).toHaveLength(0)
+      await writeSessionModel(file, {
+        version: 1,
+        rootSessionID: "ses_1",
+        revision: "rev-host",
+        mode: "override",
+        model: "e2e/test",
+        variant: null,
+      })
+    } finally {
+      release()
+      await pending
+    }
+
+    expect(replies).toHaveLength(0)
+    expect(
+      logs.some((entry) =>
+        String(entry.body.message).includes("changed while"),
+      ),
+    ).toBe(true)
+    // Settle the old prompt before checking that the live pin routes the next.
+    await hooks.event?.(replied())
+    await hooks.event?.(asked({ id: "per_after_pin_change" }))
+    expect(api.calls).toHaveLength(1)
+    expect(api.host.messages()).toHaveLength(1)
+    expect(api.host.messages()[0]!.body.model).toEqual({
+      providerID: "e2e",
+      modelID: "test",
+    })
+    expect(api.host.messages()[0]!.body.variant).toBeUndefined()
+    expect(replies).toHaveLength(1)
+    expect(replies[0]).toMatchObject({
+      path: { id: "ses_1", permissionID: "per_after_pin_change" },
+      body: { response: "once" },
+    })
+  })
+})
+
 describe("approving", () => {
   test("an approve verdict replies 'once' — and never 'always'", async () => {
     const api = mockClassifierApi()

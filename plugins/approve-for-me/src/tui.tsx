@@ -32,6 +32,7 @@ import {
   formatModelRef,
   globalConfigCandidates,
   hostConfigRoot,
+  JEV_MODEL_REF,
   legacyProjectSettingsFile,
   type Override,
   ownPackageDir,
@@ -81,14 +82,15 @@ import {
  *     override dies with the instance and the persistent default takes over
  *     again on next start.
  *   - Approve for Me: choose classifier model — a model picker over every
- *     provider/model available in this OpenCode instance, plus "Session model
- *     (default)". When the picked model defines variants (OpenCode's effort
- *     levels), a second step picks one, or the model's default. Scope is
- *     chosen first: a trusted root-session record, a trusted project-keyed
- *     config file, or this plugin's global opencode.json[c] entry (edited
- *     surgically so comments survive). Worktree config is only ever honored
- *     under the blessing below — an agent with project edit access must not
- *     be able to reconfigure the judge that approves its own actions.
+ *     provider/model available in this OpenCode instance, plus the native Jev
+ *     classifier and "Session model (default)". When the picked model defines
+ *     variants (OpenCode's effort levels), a second step picks one, or the
+ *     model's default. Scope is chosen first: a trusted root-session record,
+ *     a trusted project-keyed config file, or this plugin's global
+ *     opencode.json[c] entry (edited surgically so comments survive). Worktree
+ *     config is only ever honored under the blessing below — an agent with
+ *     project edit access must not be able to reconfigure the judge that
+ *     approves its own actions.
  *   - Approve for Me: set classifier timeout — a picker over preset
  *     wall-clock budgets for one classification (default 2 minutes; local
  *     and budget cloud judges can take well over a minute per verdict).
@@ -110,7 +112,7 @@ import {
  *     shaped like the host's own Context and LSP sidebar sections. "Active
  *     right now" is not read off the settings files alone: the server half
  *     writes a ready/paused beacon into the instance-scoped activity file,
- *     and the TUI itself pre-checks a pinned judge against this instance's
+ *     and the TUI itself pre-checks catalog-backed pins against this instance's
  *     model catalog — so a missing server half, an unreadable store, or a
  *     pinned model this instance does not have all render as "paused ·
  *     reason" instead of a false "on".
@@ -1001,10 +1003,11 @@ export const tui: TuiPlugin = async (api, options) => {
   const pinned = () => policy()?.settings ?? {}
   const merged = () => resolveSettings(pinned())
 
-  // The model's catalog entry in this instance, with its variant ids
-  // (OpenCode's effort levels); undefined when the instance does not have the
-  // model at all.
+  // Native classifiers do not depend on the host's provider catalog. Other
+  // models use its variant ids (OpenCode's effort levels); undefined when the
+  // instance does not have the model at all.
   const modelInfo = (ref: string): { variants: string[] } | undefined => {
+    if (ref === JEV_MODEL_REF) return { variants: [] }
     const parsed = parseModelRef(ref)
     if (!parsed) return undefined
     for (const provider of api.state.provider) {
@@ -1381,7 +1384,7 @@ export const tui: TuiPlugin = async (api, options) => {
   let dialogFlow = false
 
   // The variant ids the picked model defines (OpenCode's effort levels),
-  // straight from the host's provider state; [] when there are none.
+  // from the host's provider state; native Jev has no effort variants.
   const variantsOf = (ref: string): string[] => modelInfo(ref)?.variants ?? []
 
   const chooseModel = async () => {
@@ -1477,6 +1480,13 @@ export const tui: TuiPlugin = async (api, options) => {
         value: SESSION_MODEL,
         description: "Judge with whatever model the asking session is using",
       })
+      models.push({
+        title: "Jev",
+        value: JEV_MODEL_REF,
+        description:
+          "Native classifier · opencode auth login --provider typesafe",
+        category: "TypeSafe",
+      })
       for (const provider of api.state.provider) {
         const providerAny = provider as {
           id?: string
@@ -1486,6 +1496,7 @@ export const tui: TuiPlugin = async (api, options) => {
         if (!providerAny.id || !providerAny.models) continue
         for (const [modelID, model] of Object.entries(providerAny.models)) {
           const ref = formatModelRef({ providerID: providerAny.id, modelID })
+          if (ref === JEV_MODEL_REF) continue
           models.push({
             title: model?.name || modelID,
             value: ref,

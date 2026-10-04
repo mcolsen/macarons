@@ -34,6 +34,7 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { batchKeyOf, createBatchScheduler } from "./server/batch-scheduler"
 import { createClassifierPipeline } from "./server/classifier"
 import { createHostAdapter, createHostReadCoalescer } from "./server/host"
+import { jevAuth, registerJevProvider } from "./server/jev-auth"
 import { createConcurrencyPool } from "./server/pool"
 import {
   ACTIVITY_REASON_MAX,
@@ -51,6 +52,7 @@ import {
   explicitCarveOut,
   formatModelRef,
   hostConfigRoot,
+  isJevModel,
   legacyProjectSettingsFile,
   listTrustedSessionModels,
   type ModelRef,
@@ -1384,6 +1386,9 @@ export const ApproveForMePlugin: Plugin = async ({
   const providerModel = async (
     model: ModelRef,
   ): Promise<Record<string, unknown> | undefined> => {
+    // Jev is a native classifier adapter, not an OpenCode chat provider. It
+    // has no effort variants; credentials are checked when dispatching.
+    if (isJevModel(model)) return {}
     const list = await providersCatalog()
     if (!list) return undefined
     for (const provider of list) {
@@ -2430,6 +2435,7 @@ export const ApproveForMePlugin: Plugin = async ({
     // pinning a judge must not quietly forward historical commands to a
     // provider that never saw them.
     const judgeSeesSession =
+      !isJevModel(judge.model) &&
       !!context.model &&
       judge.model.providerID === context.model.providerID &&
       judge.model.modelID === context.model.modelID
@@ -3305,6 +3311,8 @@ export const ApproveForMePlugin: Plugin = async ({
   }, 0)
 
   return {
+    auth: jevAuth,
+    config: registerJevProvider,
     event: async ({ event }) => {
       if (disposed) return
       if (

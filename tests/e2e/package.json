@@ -11,7 +11,7 @@
     "e2e:background-tasks:shutdown": "bun test background-tasks/shutdown.e2e.test.ts --max-concurrency=1 --timeout 90000",
     "e2e:bundle": "bun test persist-permissions/bundle.e2e.test.ts approve-for-me/bundle.e2e.test.ts --max-concurrency=1 --timeout 90000",
     "e2e:concurrency": "bun test approve-for-me/concurrency.e2e.test.ts --max-concurrency=1 --timeout 180000",
-    "e2e:core": "bun test persist-permissions/server.e2e.test.ts approve-for-me/server.e2e.test.ts --max-concurrency=1 --timeout 120000",
+    "e2e:core": "bun test persist-permissions/server.e2e.test.ts approve-for-me/server.e2e.test.ts approve-for-me/auth.e2e.test.ts --max-concurrency=1 --timeout 120000",
     "e2e:cron": "bun test cron/server.e2e.test.ts --max-concurrency=1 --timeout 150000",
     "e2e:install": "bun test persist-permissions/install.e2e.test.ts approve-for-me/install.e2e.test.ts --max-concurrency=1 --timeout 120000",
     "e2e:subagent-comms": "bun test subagent-comms/server.e2e.test.ts --max-concurrency=1 --timeout 120000",

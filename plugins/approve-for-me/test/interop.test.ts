@@ -216,6 +216,20 @@ describe("resolveClassifierConfig", () => {
 })
 
 describe("ClassifierConfig.providerID", () => {
+  test("recognizes the native Jev classifier without a host provider entry", async () => {
+    const dirs = await makeDirs()
+    await writeGlobalEntry(dirs, { model: "typesafe/jev" })
+    await writeServerBeacon(dirs, "ready")
+    const interop = await resolvedInterop(dirs)
+    expect(await providerID(interop)).toBe("typesafe")
+
+    await writeGlobalEntry(dirs, { model: "typesafe/jev", variant: "high" })
+    expect(await providerID(interop)).toBeUndefined()
+
+    await writeGlobalEntry(dirs, { model: "typesafe/missing" })
+    expect(await providerID(interop)).toBeUndefined()
+  })
+
   test("reports the pinned model's provider from the global plugin entry", async () => {
     const dirs = await makeDirs()
     await writeGlobalEntry(dirs, { model: "openai/gpt-5.5-codex" })
