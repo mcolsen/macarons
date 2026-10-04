@@ -255,6 +255,64 @@ describe("Jev adapter", () => {
     expect(invalid.logs.join()).not.toContain("private JSON")
   })
 
+  test("reports response diagnostics without leaking provider strings or unknown keys", async () => {
+    const privateText = "private-provider-detail"
+    const valid = answer(RISK_LEVELS, "low")
+    const cases: [unknown, string][] = [
+      [privateText, "expected a choice answer object"],
+      [{ ...valid, type: privateText }, "expected type choice"],
+      [
+        { ...valid, choice: privateText },
+        "choice is not one of the requested options",
+      ],
+      [
+        { ...valid, confidence: privateText },
+        "confidence must be a finite number between 0 and 1",
+      ],
+      [
+        {
+          ...valid,
+          probabilities: { ...valid.probabilities, low: privateText },
+        },
+        "probability for low must be a finite number between 0 and 1",
+      ],
+      [
+        {
+          ...valid,
+          probabilities: { low: 1, medium: 0, high: 0, [privateText]: 0 },
+        },
+        "probabilities must contain exactly the requested options",
+      ],
+      [
+        {
+          ...valid,
+          probabilities: { low: 0.998, medium: 0, high: 0, critical: 0 },
+        },
+        "probabilities must sum to 1 (received 0.998)",
+      ],
+    ]
+    for (const [risk, detail] of cases) {
+      const body = {
+        ...response(),
+        model: privateText,
+        answers: { ...response().answers, risk },
+        [privateText]: privateText,
+      }
+      const api = harness(() => Response.json(body))
+      const result = await api.classify(
+        request,
+        judge,
+        1_000,
+        new AbortController().signal,
+      )
+      const diagnostic = `Jev risk answer invalid: ${detail}`
+      expect(result).toEqual({ failure: diagnostic })
+      expect(api.logs.join()).toContain(diagnostic)
+      expect(JSON.stringify(result)).not.toContain(privateText)
+      expect(api.logs.join()).not.toContain(privateText)
+    }
+  })
+
   test("user cancellation ends even a transport that ignores its signal", async () => {
     const api = harness(() => new Promise<Response>(() => {}))
     const controller = new AbortController()
@@ -288,6 +346,78 @@ describe("Jev adapter", () => {
 })
 
 describe("Jev verdicts", () => {
+  test("accepts residual-corrected ties with independent confidence and reordered keys", () => {
+    const value = response()
+    value.answers.risk = {
+      type: "choice",
+      choice: "low",
+      confidence: 0.11,
+      probabilities: {
+        critical: 0.17,
+        high: 0.17,
+        medium: 0.33,
+        low: 0.32999999999999996,
+      },
+    }
+    value.answers.authorization = {
+      type: "choice",
+      choice: "implied",
+      confidence: 0.01,
+      probabilities: { clear: 0.34, none: 0.32, implied: 0.33999999999999997 },
+    }
+    const reasons: string[] = []
+    expect(parseJevVerdict(value, (reason) => reasons.push(reason))).toEqual({
+      risk: "low",
+      authorization: "implied",
+      decision: "approve",
+      reason: "Jev assessed low risk and implied authorization",
+    })
+    expect(reasons).toEqual([])
+
+    value.answers.risk.choice = "critical"
+    value.answers.risk.probabilities = {
+      low: 0.33,
+      medium: 0.17,
+      high: 0.17,
+      critical: 0.32999999999999996,
+    }
+    const verdict = parseJevVerdict(value)!
+    expect(verdict.risk).toBe("critical")
+    expect(enforcedDecision(verdict)).toBe("surface")
+  })
+
+  test("accepts the intended normalization boundary but rejects a larger deficit", () => {
+    const value = response()
+    value.answers.risk.probabilities.low = 0.999
+    const reasons: string[] = []
+    const onInvalid = (reason: string) => reasons.push(reason)
+    expect(parseJevVerdict(value, onInvalid)?.risk).toBe("low")
+    expect(reasons).toEqual([])
+
+    value.answers.risk.probabilities.low = 0.998
+    expect(parseJevVerdict(value, onInvalid)).toBeUndefined()
+    expect(reasons).toEqual([
+      "Jev risk answer invalid: probabilities must sum to 1 (received 0.998)",
+    ])
+  })
+
+  test("rejects a genuinely lower-probability selection with a numeric diagnostic", () => {
+    const value = response()
+    value.answers.risk.probabilities = {
+      low: 0.33,
+      medium: 0.34,
+      high: 0.17,
+      critical: 0.16,
+    }
+    const reasons: string[] = []
+    expect(
+      parseJevVerdict(value, (reason) => reasons.push(reason)),
+    ).toBeUndefined()
+    expect(reasons).toEqual([
+      "Jev risk answer invalid: selected choice is not the most probable (0.33 < 0.34 for medium)",
+    ])
+  })
+
   test("a model approval cannot override critical risk or missing authorization", () => {
     const value = response()
     value.answers.risk = answer(RISK_LEVELS, "critical")
@@ -304,8 +434,14 @@ describe("Jev verdicts", () => {
   })
 
   test("malformed or incomplete answers fail closed", () => {
-    for (const value of [null, [], {}, { answers: {} }, { answers: [] }])
-      expect(parseJevVerdict(value)).toBeUndefined()
+    for (const value of [null, [], {}, { answers: [] }]) {
+      const reasons: string[] = []
+      expect(
+        parseJevVerdict(value, (reason) => reasons.push(reason)),
+      ).toBeUndefined()
+      expect(reasons).toEqual(["Jev response must contain an answers object"])
+    }
+    expect(parseJevVerdict({ answers: {} })).toBeUndefined()
     const invalidAnswers = [
       null,
       {},
@@ -313,7 +449,27 @@ describe("Jev verdicts", () => {
       { ...answer(RISK_LEVELS, "low"), choice: "safe" },
       { ...answer(RISK_LEVELS, "low"), confidence: Number.NaN },
       { ...answer(RISK_LEVELS, "low"), confidence: 2 },
+      { ...answer(RISK_LEVELS, "low"), confidence: -Number.EPSILON },
+      { ...answer(RISK_LEVELS, "low"), confidence: 1 + Number.EPSILON },
       { ...answer(RISK_LEVELS, "low"), probabilities: { low: 1 } },
+      {
+        ...answer(RISK_LEVELS, "low"),
+        probabilities: {
+          low: 1,
+          medium: -Number.EPSILON,
+          high: 0,
+          critical: 0,
+        },
+      },
+      {
+        ...answer(RISK_LEVELS, "low"),
+        probabilities: {
+          low: 1 + Number.EPSILON,
+          medium: 0,
+          high: 0,
+          critical: 0,
+        },
+      },
       {
         ...answer(RISK_LEVELS, "low"),
         probabilities: { low: 0.1, medium: 0, high: 0, critical: 0.9 },
@@ -323,13 +479,20 @@ describe("Jev verdicts", () => {
         probabilities: { low: 1, medium: 1, high: 0, critical: 0 },
       },
     ]
-    for (const invalid of invalidAnswers)
+    for (const invalid of invalidAnswers) {
+      const reasons: string[] = []
       expect(
-        parseJevVerdict({
-          ...response(),
-          answers: { ...response().answers, risk: invalid },
-        }),
+        parseJevVerdict(
+          {
+            ...response(),
+            answers: { ...response().answers, risk: invalid },
+          },
+          (reason) => reasons.push(reason),
+        ),
       ).toBeUndefined()
+      expect(reasons).toHaveLength(1)
+      expect(reasons[0]).toStartWith("Jev risk answer invalid: ")
+    }
   })
 
   test("untrusted request text stays in state, never in typed question instructions", () => {

@@ -251,7 +251,10 @@ and approve/surface. Each question carries the same classifier policy. The
 plugin validates the typed answers and probability distributions, then applies
 the existing risk × authorization matrix; Jev's surface choice can make the
 outcome stricter. Confidence is validated but does not introduce an additional
-approval threshold. Jev does not generate free-text explanations, so activity
+approval threshold. Probability comparisons tolerate machine-precision rounding
+at tied choices. Invalid answers identify the failing question and validation
+check in the activity stream and server log, without logging provider response
+text. Jev does not generate free-text explanations, so activity
 and journal reasons summarize its selected grades and any manual-review choice.
 
 The request includes the same bounded user-message window, current permission

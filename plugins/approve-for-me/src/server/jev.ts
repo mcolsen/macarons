@@ -12,6 +12,9 @@ import { readJevApiKey } from "./jev-auth"
 
 const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 const DECISIONS = ["approve", "surface"] as const
+// A few arithmetic operations on probabilities can leave mathematically tied
+// values a handful of ulps apart. This is not a confidence/approval threshold.
+const PROBABILITY_ROUNDOFF = 8 * Number.EPSILON
 
 function question(instructions: string, choices: readonly string[]) {
   return {
@@ -59,39 +62,75 @@ function probability(value: unknown): value is number {
 function choice<T extends string>(
   answer: unknown,
   choices: readonly T[],
+  invalid: (reason: string) => undefined,
 ): T | undefined {
-  if (
-    !object(answer) ||
-    answer.type !== "choice" ||
-    !choices.includes(answer.choice as T) ||
-    !probability(answer.confidence) ||
-    !object(answer.probabilities)
-  )
-    return undefined
+  if (!object(answer)) return invalid("expected a choice answer object")
+  if (answer.type !== "choice") return invalid("expected type choice")
+  if (!choices.includes(answer.choice as T))
+    return invalid("choice is not one of the requested options")
+  if (!probability(answer.confidence))
+    return invalid(
+      `confidence must be a finite number between 0 and 1${typeof answer.confidence === "number" ? ` (received ${answer.confidence})` : ""}`,
+    )
   const probabilities = answer.probabilities
-  if (Object.keys(probabilities).length !== choices.length) return undefined
+  if (
+    !object(probabilities) ||
+    Object.keys(probabilities).length !== choices.length ||
+    !choices.every((option) => Object.hasOwn(probabilities, option))
+  )
+    return invalid("probabilities must contain exactly the requested options")
   let sum = 0
-  const selected = probabilities[answer.choice as T]
-  if (!probability(selected)) return undefined
   for (const option of choices) {
     const value = probabilities[option]
-    if (!probability(value) || value > selected) return undefined
+    if (!probability(value))
+      return invalid(
+        `probability for ${option} must be a finite number between 0 and 1${typeof value === "number" ? ` (received ${value})` : ""}`,
+      )
     sum += value
   }
   // Allow floating-point rounding, but never accept a partial distribution.
-  if (Math.abs(sum - 1) > 0.001) return undefined
+  if (Math.abs(sum - 1) > 0.001 + PROBABILITY_ROUNDOFF)
+    return invalid(`probabilities must sum to 1 (received ${sum})`)
+  const selected = probabilities[answer.choice as T] as number
+  for (const option of choices) {
+    const value = probabilities[option] as number
+    if (value - selected > PROBABILITY_ROUNDOFF)
+      return invalid(
+        `selected choice is not the most probable (${selected} < ${value} for ${option})`,
+      )
+  }
   return answer.choice as T
 }
 
-export function parseJevVerdict(response: unknown): Verdict | undefined {
-  if (!object(response) || !object(response.answers)) return undefined
-  const risk = choice(response.answers.risk, RISK_LEVELS)
+export function parseJevVerdict(
+  response: unknown,
+  onInvalid?: (reason: string) => void,
+): Verdict | undefined {
+  if (!object(response) || !object(response.answers)) {
+    onInvalid?.("Jev response must contain an answers object")
+    return undefined
+  }
+  // Diagnostics contain only our field/option names and numeric values, never
+  // provider-supplied text that might echo request contents or credentials.
+  const invalid =
+    (name: "risk" | "authorization" | "decision") => (reason: string) => {
+      onInvalid?.(`Jev ${name} answer invalid: ${reason}`)
+      return undefined
+    }
+  const risk = choice(response.answers.risk, RISK_LEVELS, invalid("risk"))
+  if (!risk) return undefined
   const authorization = choice(
     response.answers.authorization,
     AUTHORIZATION_LEVELS,
+    invalid("authorization"),
   )
-  const decision = choice(response.answers.decision, DECISIONS)
-  if (!risk || !authorization || !decision) return undefined
+  if (!authorization) return undefined
+  const decision = choice(
+    response.answers.decision,
+    DECISIONS,
+    invalid("decision"),
+  )
+  if (!decision) return undefined
   // Jev chooses typed values; it cannot generate a free-text rationale. Keep
   // this summary factual rather than attributing an invented reason to it.
   return {
@@ -142,7 +181,9 @@ export async function classifyWithJev(
         throw new SafeCauseError("Jev returned invalid JSON")
       }
       signal.throwIfAborted()
-      return parseJevVerdict(result)
+      return parseJevVerdict(result, (reason) => {
+        throw new SafeCauseError(reason)
+      })
     },
     MAX_TIMER_MS,
     { signal },
