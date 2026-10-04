@@ -563,6 +563,8 @@ export type Activity = Record<string, ActivityEntry>
 export type ServerStatus = {
   state: "ready" | "paused"
   reason?: string
+  /** Credential availability only; never a key or a last-resolved-tree pause. */
+  jevAuth?: "available" | "missing"
   time: number
 }
 export type ActivityFile = { server?: ServerStatus; requests: Activity }
@@ -592,11 +594,18 @@ export function activityFile(
 
 function parseServerStatus(value: unknown): ServerStatus | undefined {
   if (!isPlainObject(value)) return undefined
-  const { state, reason, time } = value
+  const { state, reason, jevAuth, time } = value
   if (state !== "ready" && state !== "paused") return undefined
   if (typeof time !== "number" || !Number.isFinite(time)) return undefined
   if (reason !== undefined && typeof reason !== "string") return undefined
-  return { state, ...(reason ? { reason } : {}), time }
+  if (jevAuth !== undefined && jevAuth !== "available" && jevAuth !== "missing")
+    return undefined
+  return {
+    state,
+    ...(reason ? { reason } : {}),
+    ...(jevAuth ? { jevAuth } : {}),
+    time,
+  }
 }
 
 function parseActivityFile(parsed: unknown): ActivityFile | undefined {

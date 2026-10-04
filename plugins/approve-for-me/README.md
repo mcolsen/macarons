@@ -222,7 +222,12 @@ OpenCode stores the key under the `typesafe` provider in its normal server-side
 credential store (`~/.local/share/opencode/auth.json` by default, respecting
 `XDG_DATA_HOME`). With an attached TUI, `/connect` saves it on the attached
 server. With file-backed credentials, connecting, replacing, or removing a saved
-key takes effect on the next classification.
+key takes effect on the next classification. The server reports key availability
+at startup and checks it again when resolving a classifier for a permission
+request. A Jev-pinned session without a key shows **paused**, with the login hint
+in its sidebar; sessions using other judges remain independent. Adding or
+removing a key updates the sidebar on the next model resolution. Until then, a
+new session pin uses the server's last credential-availability observation.
 
 `TYPESAFE_API_KEY` in the **OpenCode server process's environment** also works
 as a fallback. A saved TypeSafe API key takes precedence; removing that saved
@@ -252,18 +257,34 @@ plugin validates the typed answers and probability distributions, then applies
 the existing risk × authorization matrix; Jev's surface choice can make the
 outcome stricter. Confidence is validated but does not introduce an additional
 approval threshold. Probability comparisons tolerate machine-precision rounding
-at tied choices. Invalid answers identify the failing question and validation
-check in the activity stream and server log, without logging provider response
+at tied choices; derived confidence gets the same eight-epsilon allowance at
+the endpoints of [0, 1]. Each probability must still lie in [0, 1], the
+distribution must sum to 1 within 0.001, and the selected choice must be a
+highest-probability option, as required by the TypeSafe API contract. Invalid
+answers identify the failing question and validation check in the activity
+stream and server log, without logging provider response
 text. Jev does not generate free-text explanations, so activity
 and journal reasons summarize its selected grades and any manual-review choice.
 
 The request includes the same bounded user-message window, current permission
 details, and untrusted project guidance described above. Historical tool calls
 are names-only. The optional co-installed secret redactor runs before any
-excerpt is cut or sent to TypeSafe. Missing credentials, API errors (including
-rate limits), malformed answers, and timeouts leave the prompt for you, with a
-failure reason in the activity stream. Requests share `timeoutMs` and the
-plugin's concurrency limit; the adapter makes one API attempt per classification.
+excerpt is cut or sent to TypeSafe. Missing credentials, API errors, malformed
+answers, and timeouts leave the prompt for you, with a failure reason in the
+activity stream. Requests share `timeoutMs` and the
+plugin's concurrency limit. HTTP 429 (rate limited) and 529 (overloaded) receive
+one retry after a jittered 250–500 ms backoff; the wait and both attempts share
+the original classification deadline and stop when you answer the prompt. A
+second failure leaves the prompt for you. Other HTTP errors, transport failures,
+and invalid responses are not retried.
+
+A live smoke call on 2026-10-04 used the exact `jevRequest` payload with a
+synthetic `git status` permission request and returned HTTP 200 from
+`jev-1.13.0`. Its probabilities passed the normalization and highest-probability
+checks without adjustment. The request inputs and returned answer fields are
+recorded in [`test/fixtures/jev-live-smoke.json`](test/fixtures/jev-live-smoke.json)
+and replayed through the classifier pipeline in CI; no live credential is
+required by the tests.
 
 ### Effort level (model variants)
 

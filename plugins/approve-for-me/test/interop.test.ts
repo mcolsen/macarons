@@ -189,9 +189,10 @@ async function writeServerBeacon(
   state: "ready" | "paused",
   reason?: string,
   instanceID = INSTANCE_A,
+  jevAuth?: "available" | "missing",
 ) {
   await writeActivity(activityFile(dirs.state, dirs.project, instanceID), {
-    server: { state, ...(reason ? { reason } : {}), time: Date.now() },
+    server: { state, ...(reason ? { reason } : {}), jevAuth, time: Date.now() },
     requests: {},
   })
 }
@@ -219,8 +220,15 @@ describe("ClassifierConfig.providerID", () => {
   test("recognizes the native Jev classifier without a host provider entry", async () => {
     const dirs = await makeDirs()
     await writeGlobalEntry(dirs, { model: "typesafe/jev" })
-    await writeServerBeacon(dirs, "ready")
+    await writeServerBeacon(dirs, "ready", undefined, INSTANCE_A, "available")
     const interop = await resolvedInterop(dirs)
+    expect(await providerID(interop)).toBe("typesafe")
+
+    await writeServerBeacon(dirs, "ready", undefined, INSTANCE_A, "missing")
+    expect(await providerID(interop)).toBeUndefined()
+    await writeServerBeacon(dirs, "ready")
+    expect(await providerID(interop)).toBeUndefined()
+    await writeServerBeacon(dirs, "ready", undefined, INSTANCE_A, "available")
     expect(await providerID(interop)).toBe("typesafe")
 
     await writeGlobalEntry(dirs, { model: "typesafe/jev", variant: "high" })

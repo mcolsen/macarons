@@ -172,6 +172,8 @@ export async function resolveClassifierConfig(input: {
         // means nothing is spending quota, however the settings read.
         const activity = await readActivity(trusted.activityPath)
         if (activity?.server?.state !== "ready") return undefined
+        if (isJevModel(model) && activity.server.jevAuth !== "available")
+          return undefined
         return model.providerID
       } catch {
         return undefined

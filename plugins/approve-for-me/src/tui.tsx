@@ -32,6 +32,7 @@ import {
   formatModelRef,
   globalConfigCandidates,
   hostConfigRoot,
+  JEV_AUTH_HINT,
   JEV_MODEL_REF,
   legacyProjectSettingsFile,
   type Override,
@@ -935,9 +936,9 @@ export const tui: TuiPlugin = async (api, options) => {
   const modelLabel = (model: EffectiveModel) => {
     return `${model.model ?? "session model"}${model.variant ? ` · ${model.variant}` : ""}${model.source === "session" ? " · this session" : ""}`
   }
-  // A TUI-side fault before any request hits the server: the effective pin for
-  // this root session names a model or variant this instance cannot provide.
-  // Session-model judging itself can only be checked server-side.
+  // The effective pin is local to this root session. The server's Jev
+  // credential availability is shared, but only a Jev pin consumes it; a
+  // different session's judge must never inherit its credential pause.
   const judgePause = ({ model, variant, loading }: EffectiveModel) => {
     if (loading) return undefined
     if (!model) return undefined
@@ -945,6 +946,15 @@ export const tui: TuiPlugin = async (api, options) => {
     if (!info) return `pinned model ${model} unavailable here`
     if (variant && !info.variants.includes(variant))
       return `pinned variant "${variant}" unavailable here`
+    const beacon = serverStatus()
+    if (
+      model === JEV_MODEL_REF &&
+      beacon?.state === "ready" &&
+      beacon.jevAuth !== "available"
+    )
+      return beacon.jevAuth === "missing"
+        ? JEV_AUTH_HINT
+        : "Jev credential availability not reported by server"
     return undefined
   }
   // No beacon can mean the server half is still bootstrapping (it writes one

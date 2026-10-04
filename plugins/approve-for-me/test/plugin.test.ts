@@ -22,6 +22,7 @@ import { until } from "@macarons/plugin-test-harness"
 import { DEFAULT_OPTIONS, Redactor } from "../../redact-secrets/src/shared"
 import { ApproveForMePlugin } from "../src/index"
 import { createBatchScheduler } from "../src/server/batch-scheduler"
+import { JEV_AUTH_HINT } from "../src/server/jev-auth"
 import {
   ACTIVITY_REASON_MAX,
   activityFile,
@@ -721,6 +722,152 @@ describe("Jev native classifier integration", () => {
     }) as typeof fetch
     return { host, calls }
   }
+
+  test("a persistent Jev pin publishes credential availability without leaking keys, including after auth changes", async () => {
+    delete process.env.TYPESAFE_API_KEY
+    const api = mockJevApi()
+    const { client, replies, logs } = makeClient({ providers: [] })
+    const hooks = await load(client)
+    const activity = () =>
+      readActivity(activityFile(stateDir(), root, instanceID))
+    await waitFor(async () => (await activity())?.server?.jevAuth === "missing")
+    expect((await activity())?.server?.state).toBe("ready")
+    expect((await activity())?.requests).toEqual({})
+
+    await trackModel(hooks)
+    await hooks.event?.(asked())
+    expect(api.calls).toHaveLength(0)
+    expect(replies).toHaveLength(0)
+    await waitFor(async () => (await activity())?.requests.per_1 !== undefined)
+    expect((await activity())?.requests.per_1?.reason).toBe(JEV_AUTH_HINT)
+
+    const secret = "synthetic-typesafe-regression-key"
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
+      typesafe: { type: "api", key: secret },
+    })
+    await trackModel(hooks, "ses_2")
+    await hooks.event?.(asked({ id: "per_2", sessionID: "ses_2" }))
+    expect(api.calls).toHaveLength(1)
+    expect(replies).toHaveLength(1)
+    await waitFor(
+      async () => (await activity())?.server?.jevAuth === "available",
+    )
+
+    // With the saved key gone, the environment fallback is still usable.
+    process.env.OPENCODE_AUTH_CONTENT = "{}"
+    process.env.TYPESAFE_API_KEY = "synthetic-env-key"
+    await trackModel(hooks, "ses_3")
+    await hooks.event?.(asked({ id: "per_3", sessionID: "ses_3" }))
+    expect(api.calls).toHaveLength(2)
+    expect(replies).toHaveLength(2)
+
+    delete process.env.TYPESAFE_API_KEY
+    await trackModel(hooks, "ses_4")
+    await hooks.event?.(asked({ id: "per_4", sessionID: "ses_4" }))
+    expect(api.calls).toHaveLength(2)
+    expect(replies).toHaveLength(2)
+    await waitFor(async () => (await activity())?.server?.jevAuth === "missing")
+    const feed = await activity()
+    expect(feed?.server?.state).toBe("ready")
+    expect(feed?.requests.per_4?.reason).toBe(JEV_AUTH_HINT)
+    expect(JSON.stringify(feed)).not.toContain(secret)
+    expect(JSON.stringify(logs)).not.toContain(secret)
+  })
+
+  test("session Jev and non-Jev pins remain independently classifiable with missing credentials", async () => {
+    delete process.env.TYPESAFE_API_KEY
+    await writeGlobalEntry({ model: "e2e/test" })
+    const api = mockJevApi()
+    const { client, replies } = makeClient()
+    const hooks = await load(client)
+    const activity = () =>
+      readActivity(activityFile(stateDir(), root, instanceID))
+    await waitFor(async () => (await activity())?.server?.jevAuth === "missing")
+
+    const file = sessionModelFile(sessionModelsDir(), "ses_1")
+    await writeSessionModel(file, {
+      version: 1,
+      rootSessionID: "ses_1",
+      revision: "rev-jev",
+      mode: "override",
+      model: "typesafe/jev",
+      variant: null,
+    })
+    await trackModel(hooks)
+    await hooks.event?.(asked())
+    expect(api.calls).toHaveLength(0)
+    expect(replies).toHaveLength(0)
+    expect((await activity())?.server).toMatchObject({
+      state: "ready",
+      jevAuth: "missing",
+    })
+
+    await writeSessionModel(file, {
+      version: 1,
+      rootSessionID: "ses_1",
+      revision: "rev-chat",
+      mode: "override",
+      model: "e2e/test",
+      variant: null,
+    })
+    await hooks.event?.(replied())
+    await hooks.event?.(asked({ id: "per_chat" }))
+    expect(api.host.messages()).toHaveLength(1)
+    expect(replies).toHaveLength(1)
+    expect((await activity())?.server).toMatchObject({
+      state: "ready",
+      jevAuth: "missing",
+    })
+    // Returning to Jev must still fail closed after the other tree ran.
+    await writeSessionModel(file, {
+      version: 1,
+      rootSessionID: "ses_1",
+      revision: "rev-jev-again",
+      mode: "override",
+      model: "typesafe/jev",
+      variant: null,
+    })
+    await hooks.event?.(asked({ id: "per_jev_again" }))
+    expect(api.calls).toHaveLength(0)
+    expect(replies).toHaveLength(1)
+    expect((await activity())?.server?.jevAuth).toBe("missing")
+  })
+
+  test("a chat session remains active beside a credentialless persistent Jev pin", async () => {
+    delete process.env.TYPESAFE_API_KEY
+    const api = mockJevApi()
+    const { client, replies } = makeClient()
+    const hooks = await load(client)
+    const activity = () =>
+      readActivity(activityFile(stateDir(), root, instanceID))
+    await waitFor(async () => (await activity())?.server?.jevAuth === "missing")
+    const sessionID = "ses_chat"
+    await writeSessionModel(sessionModelFile(sessionModelsDir(), sessionID), {
+      version: 1,
+      rootSessionID: sessionID,
+      revision: "rev-chat",
+      mode: "override",
+      model: "e2e/test",
+      variant: null,
+    })
+    await trackModel(hooks, sessionID)
+    await hooks.event?.(asked({ id: "per_chat", sessionID }))
+    expect(replies).toHaveLength(1)
+    expect(api.host.messages()).toHaveLength(1)
+    expect((await activity())?.server).toMatchObject({
+      state: "ready",
+      jevAuth: "missing",
+    })
+
+    await trackModel(hooks, "ses_jev")
+    await hooks.event?.(asked({ id: "per_jev", sessionID: "ses_jev" }))
+    expect(api.calls).toHaveLength(0)
+    expect(replies).toHaveLength(1)
+    expect((await activity())?.server).toMatchObject({
+      state: "ready",
+      jevAuth: "missing",
+    })
+  })
 
   test("a pin absent from the host catalog approves once with redacted state and no chat session", async () => {
     const api = mockJevApi()

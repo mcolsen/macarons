@@ -7,6 +7,8 @@ import {
 } from "@macarons/permission-rules"
 import type { AuthHook, Config } from "@opencode-ai/plugin"
 
+export { JEV_AUTH_HINT } from "../shared/classifier-models"
+
 // The host owns the key prompt and credential persistence for API methods.
 export const jevAuth = {
   provider: "typesafe",

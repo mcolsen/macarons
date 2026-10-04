@@ -23,6 +23,7 @@ import {
   ACTIVITY_REASON_MAX,
   blessFile,
   GLOBAL_SETTINGS_BASENAME,
+  JEV_AUTH_HINT,
   JEV_MODEL_REF,
   legacyProjectSettingsFile,
   activityFile as ownedActivityFile,
@@ -1856,7 +1857,7 @@ describe("the model picker", () => {
         })
       }
       await writeJson(activityFile(stateDir(), root), {
-        server: { state: "ready", time: Date.now() },
+        server: { state: "ready", jevAuth: "available", time: Date.now() },
         requests: {},
       })
       const harness = makeApi({ baseUrl: "https://remote.example" })
@@ -3701,19 +3702,74 @@ describe("sidebar rendering (audit WP8)", () => {
     },
   )
 
-  test("Jev reports the server's credential fault instead of a catalog fault", async () => {
+  test("Jev reports the server's credential availability instead of a catalog fault", async () => {
     await writeJson(projectSettingsFile(), { model: JEV_MODEL_REF })
-    const reason = "TYPESAFE_API_KEY is not configured on the server"
     await writeJson(activityFile(stateDir(), root), {
-      server: { state: "paused", reason, time: Date.now() },
+      server: { state: "ready", jevAuth: "missing", time: Date.now() },
       requests: {},
     })
     const harness = makeApi({ baseUrl: "https://remote.example" })
     await loadTui(harness)
     const view = await renderSidebar(harness, "ses_1", 80)
-    const frame = await settleFrame(view, reason, 4_000)
-    expect(frame).toContain(`paused · ${reason}`)
+    const frame = await settleFrame(
+      view,
+      "paused · run opencode auth login",
+      4_000,
+    )
+    expect(frame.replace(/\s+/g, " ")).toContain(`paused · ${JEV_AUTH_HINT}`)
     expect(frame).not.toContain("unavailable here")
+  })
+
+  test("two session slots apply shared Jev auth only to their effective pin", async () => {
+    await writeJson(projectSettingsFile(), {
+      enabled: true,
+      model: JEV_MODEL_REF,
+    })
+    await writeSessionModel(sessionModelPath("ses_chat"), {
+      version: 1,
+      rootSessionID: "ses_chat",
+      revision: "rev_chat",
+      mode: "override",
+      model: "e2e/test",
+      variant: null,
+    })
+    const beacon = async (jevAuth: "available" | "missing") =>
+      writeJson(activityFile(stateDir(), root), {
+        server: { state: "ready", jevAuth, time: Date.now() },
+        requests: {},
+      })
+    await beacon("missing")
+    const harness = makeApi()
+    await loadTui(harness, { feed: false })
+    const view = await testRender(
+      () => [
+        harness.slotPlugins[0]!.slots.sidebar_content(
+          {},
+          { session_id: "ses_jev" },
+        ),
+        harness.slotPlugins[0]!.slots.sidebar_content(
+          {},
+          { session_id: "ses_chat" },
+        ),
+      ],
+      { width: 110, height: 12 },
+    )
+    try {
+      let frame = await settleFrame(view, JEV_AUTH_HINT, 4_000)
+      expect(frame).toContain(`paused · ${JEV_AUTH_HINT}`)
+      expect(frame).toContain("on · e2e/test · this session")
+
+      await beacon("available")
+      frame = await settleFrame(view, `on · ${JEV_MODEL_REF}`, 4_000)
+      expect(frame).toContain("on · e2e/test · this session")
+      expect(frame).not.toContain(JEV_AUTH_HINT)
+
+      await beacon("missing")
+      frame = await settleFrame(view, JEV_AUTH_HINT, 4_000)
+      expect(frame).toContain("on · e2e/test · this session")
+    } finally {
+      await view.renderer.destroy()
+    }
   })
 
   test("a pinned model absent here renders paused-naming-the-model, in warning colour", async () => {

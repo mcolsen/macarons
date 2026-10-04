@@ -10,6 +10,7 @@ import {
   enforcedDecision,
   RISK_LEVELS,
 } from "../src/shared"
+import liveSmoke from "./fixtures/jev-live-smoke.json"
 
 const scope = {
   directory: "/test/jev-classifier",
@@ -91,6 +92,28 @@ function harness(
 }
 
 describe("Jev adapter", () => {
+  test("accepts the captured live TypeSafe response through the production pipeline", async () => {
+    // HTTP 200 on 2026-10-04, using jevRequest(liveSmoke.request) verbatim.
+    // Only synthetic request text was sent; CI replays the captured answer.
+    const api = harness(() => Response.json(liveSmoke.response))
+    const result = await api.classify(
+      liveSmoke.request,
+      judge,
+      1_000,
+      new AbortController().signal,
+    )
+    expect(result.verdict).toEqual({
+      risk: "low",
+      authorization: "clear",
+      decision: "approve",
+      reason: "Jev assessed low risk and clear authorization",
+    })
+    expect(api.calls[0]!.url).toBe(liveSmoke.endpoint)
+    expect(JSON.parse(api.calls[0]!.init.body as string)).toEqual(
+      jevRequest(liveSmoke.request),
+    )
+  })
+
   test("sends the documented typed request with isolated policy and server auth", async () => {
     const api = harness()
     const result = await api.classify(
@@ -222,7 +245,7 @@ describe("Jev adapter", () => {
     expect(api.hostCalls).toEqual([])
   })
 
-  for (const status of [401, 422, 429, 529]) {
+  for (const status of [401, 422, 500]) {
     test(`HTTP ${status} leaves the prompt and does not expose provider text`, async () => {
       const api = harness(
         () => new Response("private provider detail", { status }),
@@ -234,6 +257,84 @@ describe("Jev adapter", () => {
       expect(api.logs.join()).not.toContain("private provider detail")
     })
   }
+
+  for (const status of [429, 529]) {
+    test(`HTTP ${status} retries once after backoff with the same payload and deadline`, async () => {
+      let attempts = 0
+      let cancelled = 0
+      const api = harness(() => {
+        if (++attempts > 1) return Response.json(response())
+        return new Response(
+          new ReadableStream({
+            cancel() {
+              cancelled++
+            },
+          }),
+          { status },
+        )
+      })
+      const started = performance.now()
+      const result = await api.classify(
+        request,
+        judge,
+        2_000,
+        new AbortController().signal,
+      )
+      expect(result.verdict?.decision).toBe("approve")
+      expect(api.calls).toHaveLength(2)
+      expect(cancelled).toBe(1)
+      expect(performance.now() - started).toBeGreaterThanOrEqual(240)
+      expect(api.calls[1]!.init.body).toBe(api.calls[0]!.init.body)
+      expect(api.calls[1]!.init.signal).toBe(api.calls[0]!.init.signal)
+    })
+
+    test(`repeated HTTP ${status} stops after the retry without exposing provider text`, async () => {
+      const api = harness(
+        () => new Response("private provider detail", { status }),
+      )
+      expect(
+        await api.classify(request, judge, 2_000, new AbortController().signal),
+      ).toEqual({ failure: `Jev reported HTTP ${status}` })
+      expect(api.calls).toHaveLength(2)
+      expect(api.logs.join()).not.toContain("private provider detail")
+    })
+  }
+
+  test("user cancellation during backoff prevents a retry", async () => {
+    let cancelled = false
+    const api = harness(
+      () =>
+        new Response(
+          new ReadableStream({
+            cancel() {
+              cancelled = true
+            },
+          }),
+          { status: 429 },
+        ),
+    )
+    const controller = new AbortController()
+    const pending = api.classify(request, judge, 2_000, controller.signal)
+    await until(() => cancelled)
+    controller.abort()
+    expect(await pending).toEqual({})
+    expect(api.calls).toHaveLength(1)
+    expect(api.calls[0]!.init.signal?.aborted).toBe(true)
+  })
+
+  test("the original classification deadline also bounds retry backoff", async () => {
+    const api = harness(() => new Response(null, { status: 529 }))
+    const result = await api.classify(
+      request,
+      judge,
+      20,
+      new AbortController().signal,
+    )
+    expect(result.verdict).toBeUndefined()
+    expect(result.failure).toContain("no verdict within")
+    expect(api.calls).toHaveLength(1)
+    expect(api.calls[0]!.init.signal?.aborted).toBe(true)
+  })
 
   test("transport errors and invalid JSON have safe failure messages", async () => {
     const api = harness(() => {
@@ -346,6 +447,32 @@ describe("Jev adapter", () => {
 })
 
 describe("Jev verdicts", () => {
+  test("tolerates machine roundoff in derived confidence without relaxing the approval policy", () => {
+    const value = response()
+    value.answers.decision = answer(["approve", "surface"], "surface")
+    for (const confidence of [
+      -8 * Number.EPSILON,
+      -Number.EPSILON,
+      1 + Number.EPSILON,
+      1 + 8 * Number.EPSILON,
+    ]) {
+      value.answers.decision.confidence = confidence
+      const verdict = parseJevVerdict(value)!
+      expect(verdict.decision).toBe("surface")
+      expect(enforcedDecision(verdict)).toBe("surface")
+    }
+    for (const confidence of [
+      -9 * Number.EPSILON,
+      1 + 9 * Number.EPSILON,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+    ]) {
+      value.answers.decision.confidence = confidence
+      expect(parseJevVerdict(value)).toBeUndefined()
+    }
+  })
+
   test("accepts residual-corrected ties with independent confidence and reordered keys", () => {
     const value = response()
     value.answers.risk = {
@@ -449,8 +576,8 @@ describe("Jev verdicts", () => {
       { ...answer(RISK_LEVELS, "low"), choice: "safe" },
       { ...answer(RISK_LEVELS, "low"), confidence: Number.NaN },
       { ...answer(RISK_LEVELS, "low"), confidence: 2 },
-      { ...answer(RISK_LEVELS, "low"), confidence: -Number.EPSILON },
-      { ...answer(RISK_LEVELS, "low"), confidence: 1 + Number.EPSILON },
+      { ...answer(RISK_LEVELS, "low"), confidence: -0.001 },
+      { ...answer(RISK_LEVELS, "low"), confidence: 1.001 },
       { ...answer(RISK_LEVELS, "low"), probabilities: { low: 1 } },
       {
         ...answer(RISK_LEVELS, "low"),

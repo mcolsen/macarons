@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises"
 import { MAX_TIMER_MS, withTimeout } from "@macarons/permission-rules"
 import {
   AUTHORIZATION_LEVELS,
@@ -8,12 +9,12 @@ import {
   type Verdict,
 } from "../shared"
 import { SafeCauseError } from "./host"
-import { readJevApiKey } from "./jev-auth"
+import { JEV_AUTH_HINT, readJevApiKey } from "./jev-auth"
 
 const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 const DECISIONS = ["approve", "surface"] as const
-// A few arithmetic operations on probabilities can leave mathematically tied
-// values a handful of ulps apart. This is not a confidence/approval threshold.
+// Derived confidence can stray just outside [0, 1], and mathematically tied
+// probabilities can differ by a few ulps. This is not an approval threshold.
 const PROBABILITY_ROUNDOFF = 8 * Number.EPSILON
 
 function question(instructions: string, choices: readonly string[]) {
@@ -50,12 +51,12 @@ function object(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value)
 }
 
-function probability(value: unknown): value is number {
+function probability(value: unknown, roundoff = 0): value is number {
   return (
     typeof value === "number" &&
     Number.isFinite(value) &&
-    value >= 0 &&
-    value <= 1
+    value >= -roundoff &&
+    value <= 1 + roundoff
   )
 }
 
@@ -68,7 +69,7 @@ function choice<T extends string>(
   if (answer.type !== "choice") return invalid("expected type choice")
   if (!choices.includes(answer.choice as T))
     return invalid("choice is not one of the requested options")
-  if (!probability(answer.confidence))
+  if (!probability(answer.confidence, PROBABILITY_ROUNDOFF))
     return invalid(
       `confidence must be a finite number between 0 and 1${typeof answer.confidence === "number" ? ` (received ${answer.confidence})` : ""}`,
     )
@@ -149,29 +150,38 @@ export async function classifyWithJev(
     async (signal) => {
       const apiKey = await readJevApiKey()
       signal.throwIfAborted()
-      if (!apiKey)
-        throw new SafeCauseError(
-          "run opencode auth login --provider typesafe or set TYPESAFE_API_KEY on the server",
-        )
+      if (!apiKey) throw new SafeCauseError(JEV_AUTH_HINT)
+      const body = JSON.stringify(jevRequest(request))
       let response: Response
-      try {
-        response = await fetch(JEV_ENDPOINT, {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${apiKey}`,
-            "content-type": "application/json",
-          },
-          body: JSON.stringify(jevRequest(request)),
-          signal,
-          redirect: "error",
-        })
-      } catch {
-        // Neither transport errors nor provider bodies are trusted log text:
-        // they can contain credentials or echoes of the submitted request.
-        throw new SafeCauseError("Jev request failed")
-      }
-      if (!response.ok) {
+      for (let attempt = 0; ; attempt++) {
+        signal.throwIfAborted()
+        try {
+          response = await fetch(JEV_ENDPOINT, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${apiKey}`,
+              "content-type": "application/json",
+            },
+            body,
+            signal,
+            redirect: "error",
+          })
+        } catch {
+          // Neither transport errors nor provider bodies are trusted log text:
+          // they can contain credentials or echoes of the submitted request.
+          throw new SafeCauseError("Jev request failed")
+        }
+        if (response.ok) break
         await response.body?.cancel().catch(() => {})
+        if (
+          attempt === 0 &&
+          (response.status === 429 || response.status === 529)
+        ) {
+          // One backoff step, with jitter to spread concurrent prompt bursts.
+          // Waiting and both attempts share the original classifier deadline.
+          await delay(250 + Math.random() * 250, undefined, { signal })
+          continue
+        }
         throw new SafeCauseError(`Jev reported HTTP ${response.status}`)
       }
       let result: unknown

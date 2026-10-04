@@ -465,6 +465,24 @@ describe("reading and writing", () => {
     expect(await readActivity(file())).toEqual(activity)
   })
 
+  test("Jev credential availability round-trips without changing the instance-wide pause", async () => {
+    const activity = {
+      server: {
+        state: "ready" as const,
+        jevAuth: "missing" as const,
+        time: 4,
+      },
+      requests: {},
+    }
+    await writeActivity(file(), activity)
+    expect(await readActivity(file())).toEqual(activity)
+    await writeActivity(file(), {
+      ...activity,
+      server: { ...activity.server, jevAuth: "available" },
+    })
+    expect((await readActivity(file()))?.server?.jevAuth).toBe("available")
+  })
+
   test("writes owned activity files privately without widening stricter modes under umask 022", async () => {
     if (process.platform === "win32") return
     const state = path.join(sandboxRoot, "state")
@@ -526,6 +544,7 @@ describe("reading and writing", () => {
       { state: "on", time: 1 },
       { state: "ready", time: "soon" },
       { state: "paused", reason: 7, time: 1 },
+      { state: "ready", jevAuth: "secret-or-invalid-value", time: 1 },
       "ready",
     ]) {
       await fs.writeFile(file(), JSON.stringify({ server, requests: {} }))
