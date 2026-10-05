@@ -863,6 +863,16 @@ describe("Jev native classifier integration", () => {
     await hooks.event?.(asked({ id: "per_jev", sessionID: "ses_jev" }))
     expect(api.calls).toHaveLength(0)
     expect(replies).toHaveLength(1)
+    // Activity writes are queued; wait for this request's settled snapshot,
+    // rather than its provisional ancestry pause or the previous ready state.
+    await waitFor(async () => {
+      const feed = await activity()
+      return (
+        feed?.requests.per_jev?.reason === JEV_AUTH_HINT &&
+        feed.server?.state === "ready" &&
+        feed.server.jevAuth === "missing"
+      )
+    })
     expect((await activity())?.server).toMatchObject({
       state: "ready",
       jevAuth: "missing",
@@ -900,12 +910,12 @@ describe("Jev native classifier integration", () => {
         body: { model: "jev-latest" },
       })
       const state = api.calls[0]!.body.state
-      expect(typeof state).toBe("string")
-      expect(state).toContain("tool: bash")
-      expect(state).toContain("git status --short")
-      expect(state).toContain("Run the linter and fix warnings")
-      expect(state).toContain("[REDACTED-SECRET:")
-      expect(state).not.toContain(secret)
+      expect(typeof state.request).toBe("string")
+      expect(state.request).toContain("tool: bash")
+      expect(state.request).toContain("git status --short")
+      expect(state.request).toContain("Run the linter and fix warnings")
+      expect(state.request).toContain("[REDACTED-SECRET:")
+      expect(JSON.stringify(state)).not.toContain(secret)
       expect(api.host.sessions()).toHaveLength(0)
       expect(api.host.messages()).toHaveLength(0)
       expect(
@@ -1016,7 +1026,7 @@ describe("Jev native classifier integration", () => {
 
     expect(replies).toHaveLength(1)
     expect(api.calls).toHaveLength(1)
-    const state = api.calls[0]!.body.state
+    const state = api.calls[0]!.body.state.request
     expect(state).toContain("Check the working tree")
     expect(state).toContain("git status --short")
     expect(state).toContain("- bash")

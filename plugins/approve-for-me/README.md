@@ -252,11 +252,20 @@ clears an earlier variant pin, and a manually configured non-default variant
 leaves prompts for you.
 
 Each request asks three independent **Choice** questions: risk, authorization,
-and approve/surface. Each question carries the same classifier policy. The
-plugin validates the typed answers and probability distributions, then applies
-the existing risk × authorization matrix; Jev's surface choice can make the
-outcome stricter. Confidence is validated but does not introduce an additional
-approval threshold. Probability comparisons tolerate machine-precision rounding
+and approve/surface. The structured `state` contains one copy of the full
+classifier policy in `policy`, alongside the bounded request context in
+`request`. Each question uses short instructions referring to that shared
+policy and explicitly treats request content as data, not policy instructions.
+This avoids sending the same policy three times: the synthetic `git status`
+fixture's JSON body falls from 45,551 to 16,892 characters (about 63% smaller). These are payload
+sizes, not measured Jev token counts. TypeSafe documents that
+[batched questions pay for shared state once](https://docs.typesafe.ai/cookbooks/parallel_questions);
+[pricing is input-token-only](https://docs.typesafe.ai/models), with output free.
+
+The plugin validates the typed answers and probability distributions, then
+applies the existing risk × authorization matrix; Jev's surface choice can
+make the outcome stricter. Confidence is validated but does not introduce an
+additional approval threshold. Probability comparisons tolerate machine-precision rounding
 at tied choices; derived confidence gets the same eight-epsilon allowance at
 the endpoints of [0, 1]. Each probability must still lie in [0, 1], the
 distribution must sum to 1 within 0.001, and the selected choice must be a
@@ -278,13 +287,15 @@ the original classification deadline and stop when you answer the prompt. A
 second failure leaves the prompt for you. Other HTTP errors, transport failures,
 and invalid responses are not retried.
 
-A live smoke call on 2026-10-04 used the exact `jevRequest` payload with a
-synthetic `git status` permission request and returned HTTP 200 from
-`jev-1.13.0`. Its probabilities passed the normalization and highest-probability
-checks without adjustment. The request inputs and returned answer fields are
-recorded in [`test/fixtures/jev-live-smoke.json`](test/fixtures/jev-live-smoke.json)
+A live smoke call on 2026-10-04 used the earlier request format (policy repeated
+per question) with a synthetic `git status` permission request and returned
+HTTP 200 from `jev-1.13.0`. Its probabilities passed the normalization and
+highest-probability checks without adjustment. The request inputs and returned
+answer fields are recorded in
+[`test/fixtures/jev-live-smoke.json`](test/fixtures/jev-live-smoke.json)
 and replayed through the classifier pipeline in CI; no live credential is
-required by the tests.
+required by the tests. This fixture validates response parsing, not live
+classification or token usage with the shared-policy request format.
 
 ### Effort level (model variants)
 
