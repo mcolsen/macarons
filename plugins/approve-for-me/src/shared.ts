@@ -11,6 +11,11 @@ export {
   formatModelRef,
   parseModelRef,
 } from "@macarons/permission-rules"
+export {
+  isJevModel,
+  JEV_AUTH_HINT,
+  JEV_MODEL_REF,
+} from "./shared/classifier-models"
 export type {
   AuthorizationLevel,
   ClassifierRequest,
@@ -21,6 +26,7 @@ export type {
 } from "./shared/classifier-policy"
 export {
   AUTHORIZATION_LEVELS,
+  CLASSIFIER_POLICY_PROMPT,
   CLASSIFIER_SYSTEM_PROMPT,
   classifierUserPrompt,
   enforcedDecision,

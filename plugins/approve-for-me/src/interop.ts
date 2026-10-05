@@ -3,6 +3,7 @@ import { openCodeDataDir } from "@macarons/permission-rules"
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import {
   hostConfigRoot,
+  isJevModel,
   legacyProjectSettingsFile,
   ownPackageDir,
   parseModelRef,
@@ -156,9 +157,10 @@ export async function resolveClassifierConfig(input: {
         if (!settings.model) return undefined
         const model = parseModelRef(settings.model)
         if (!model) return undefined
-        const entry = providers.find(
-          (provider) => provider.id === model.providerID,
-        )?.models[model.modelID]
+        const entry = isJevModel(model)
+          ? {}
+          : providers.find((provider) => provider.id === model.providerID)
+              ?.models[model.modelID]
         if (!entry) return undefined
         if (
           settings.variant &&
@@ -170,6 +172,8 @@ export async function resolveClassifierConfig(input: {
         // means nothing is spending quota, however the settings read.
         const activity = await readActivity(trusted.activityPath)
         if (activity?.server?.state !== "ready") return undefined
+        if (isJevModel(model) && activity.server.jevAuth !== "available")
+          return undefined
         return model.providerID
       } catch {
         return undefined

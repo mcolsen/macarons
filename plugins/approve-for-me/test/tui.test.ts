@@ -23,6 +23,8 @@ import {
   ACTIVITY_REASON_MAX,
   blessFile,
   GLOBAL_SETTINGS_BASENAME,
+  JEV_AUTH_HINT,
+  JEV_MODEL_REF,
   legacyProjectSettingsFile,
   activityFile as ownedActivityFile,
   overrideFile as ownedOverrideFile,
@@ -1808,7 +1810,7 @@ describe("the model picker", () => {
     expect(await readGlobalEntryOptions()).toEqual({ model: "e2e/other" })
   })
 
-  test("asks for scope before listing the session default and every provider model", async () => {
+  test("asks for scope before listing the session default, Jev, and every provider model", async () => {
     const harness = makeApi()
     await loadTui(harness)
     const run = command(harness, "permissions_approve_for_me.model")()
@@ -1823,12 +1825,154 @@ describe("the model picker", () => {
     const options = harness.selects[1]!.options
     expect(options[0]!.title).toBe("Session model (default)")
     expect(options[0]!.value).toBeNull()
-    const values = options.map((option) => option.value)
-    expect(values).toContain("e2e/test")
-    expect(values).toContain("e2e/other")
-    expect(values).toContain("anthropic/claude-sonnet-5")
+    expect(options.map((option) => option.value)).toEqual([
+      null,
+      JEV_MODEL_REF,
+      "e2e/test",
+      "e2e/other",
+      "e2e/reasoner",
+      "anthropic/claude-sonnet-5",
+    ])
     harness.api.ui.dialog.clear() // dismiss
     await run
+  })
+
+  test.each(["session", "project", "global"])(
+    "Jev saves in %s scope, clears stale effort, and stays available without a host catalog entry",
+    async (scope) => {
+      const previous = {
+        model: "e2e/reasoner",
+        variant: "high",
+        timeoutMs: 45_000,
+      }
+      await writeGlobalEntry(previous)
+      if (scope === "session") {
+        await writeSessionModel(sessionModelPath("ses_1"), {
+          version: 1,
+          rootSessionID: "ses_1",
+          revision: "rev_reasoner",
+          mode: "override",
+          model: "e2e/reasoner",
+          variant: "high",
+        })
+      }
+      await writeJson(activityFile(stateDir(), root), {
+        server: { state: "ready", jevAuth: "available", time: Date.now() },
+        requests: {},
+      })
+      const harness = makeApi({ baseUrl: "https://remote.example" })
+      await loadTui(harness)
+      const run = command(harness, "permissions_approve_for_me.model")()
+      await until(() => harness.selects.length === 1)
+      const scopeOption = harness.selects[0]!.options.find(
+        (option) => option.value === scope,
+      )!
+      harness.selects[0]!.onSelect(scopeOption)
+      await until(() => harness.selects.length === 2)
+      const jev = harness.selects[1]!.options.find(
+        (option) => option.value === JEV_MODEL_REF,
+      )!
+      expect(jev).toMatchObject({
+        title: "Jev",
+        category: "TypeSafe",
+        description: expect.stringContaining("auth login --provider typesafe"),
+      })
+      harness.selects[1]!.onSelect(jev)
+      await run
+
+      expect(harness.selects).toHaveLength(2)
+      expect(harness.toasts.at(-1)?.variant).toBe("success")
+      expect(await readGlobalEntryOptions()).toEqual(
+        scope === "global"
+          ? { model: JEV_MODEL_REF, timeoutMs: 45_000 }
+          : previous,
+      )
+      if (scope === "project") {
+        // Explicit null masks the inherited global effort pin.
+        expect(await readJson(projectSettingsFile())).toEqual({
+          model: JEV_MODEL_REF,
+          variant: null,
+        })
+      } else {
+        expect(await fs.exists(projectSettingsFile())).toBe(false)
+      }
+      if (scope === "session") {
+        const saved = await readSessionModel(sessionModelPath("ses_1"), "ses_1")
+        expect(saved).toMatchObject({
+          status: "valid",
+          record: {
+            version: 1,
+            rootSessionID: "ses_1",
+            mode: "override",
+            model: JEV_MODEL_REF,
+            variant: null,
+          },
+        })
+        expect(saved.status === "valid" && saved.record.revision).not.toBe(
+          "rev_reasoner",
+        )
+      } else {
+        expect(await fs.exists(sessionModelPath("ses_1"))).toBe(false)
+      }
+
+      await harness.dispose()
+      const reloaded = makeApi({ baseUrl: "https://remote.example" })
+      await loadTui(reloaded)
+      const view = await renderSidebar(reloaded)
+      const label = `on · ${JEV_MODEL_REF}${scope === "session" ? " · this session" : ""}`
+      const frame = await settleFrame(view, label, 4_000)
+      expect(frame).toContain(label)
+      expect(frame).not.toContain("paused")
+      const toggle = command(reloaded, "permissions_approve_for_me.toggle")
+      await toggle()
+      await toggle()
+      expect(reloaded.toasts.at(-1)).toMatchObject({
+        variant: "success",
+        message: expect.stringContaining(`classifier: ${JEV_MODEL_REF}`),
+      })
+
+      const reopen = command(reloaded, "permissions_approve_for_me.model")()
+      try {
+        await until(() => reloaded.selects.length === 1)
+        reloaded.selects[0]!.onSelect(scopeOption)
+        await until(() => reloaded.selects.length === 2)
+        expect(reloaded.selects[1]!.current).toBe(JEV_MODEL_REF)
+      } finally {
+        reloaded.api.ui.dialog.clear()
+        await reopen
+      }
+    },
+  )
+
+  test("Jev replaces a duplicate host catalog entry and ignores its effort variants", async () => {
+    const harness = makeApi()
+    harness.api.state.provider.push({
+      id: "typesafe",
+      name: "Host TypeSafe",
+      models: {
+        jev: { name: "Host Jev", variants: { high: {} } },
+        other: { name: "Other TypeSafe model" },
+      },
+    })
+    await loadTui(harness)
+    const run = command(harness, "permissions_approve_for_me.model")()
+    await until(() => harness.selects.length === 1)
+    harness.selects[0]!.onSelect({ title: "This project", value: "project" })
+    await until(() => harness.selects.length === 2)
+    const options = harness.selects[1]!.options
+    const jev = options.filter((option) => option.value === JEV_MODEL_REF)
+    expect(jev).toEqual([
+      expect.objectContaining({ title: "Jev", category: "TypeSafe" }),
+    ])
+    expect(options).toContainEqual(
+      expect.objectContaining({ value: "typesafe/other" }),
+    )
+    harness.selects[1]!.onSelect(jev[0]!)
+    await run
+    expect(harness.selects).toHaveLength(2)
+    expect(await readJson(projectSettingsFile())).toEqual({
+      model: JEV_MODEL_REF,
+    })
   })
 
   test("picking project scope writes only to the trusted OpenCode config directory", async () => {
@@ -3507,6 +3651,125 @@ describe("sidebar rendering (audit WP8)", () => {
     expect(unavailableFrame).toContain(
       'paused · pinned variant "ultra" unavailable here',
     )
+  })
+
+  test.each([
+    ["project", false],
+    ["project", true],
+    ["session", false],
+    ["session", true],
+  ] as const)(
+    "a Jev %s effort pin stays rejected (host entry: %s)",
+    async (scope, hostEntry) => {
+      await writeJson(projectSettingsFile(), {
+        enabled: false,
+        ...(scope === "project"
+          ? { model: JEV_MODEL_REF, variant: "high" }
+          : {}),
+      })
+      if (scope === "session") {
+        await writeSessionModel(sessionModelPath("ses_1"), {
+          version: 1,
+          rootSessionID: "ses_1",
+          revision: "rev_jev_effort",
+          mode: "override",
+          model: JEV_MODEL_REF,
+          variant: "high",
+        })
+      }
+      await writeJson(activityFile(stateDir(), root), {
+        server: { state: "ready", time: Date.now() },
+        requests: {},
+      })
+      const harness = makeApi()
+      if (hostEntry) {
+        harness.api.state.provider.push({
+          id: "typesafe",
+          models: { jev: { variants: { high: {} } } },
+        })
+      }
+      await loadTui(harness)
+      await command(harness, "permissions_approve_for_me.toggle")()
+      const reason = 'pinned variant "high" unavailable here'
+      expect(harness.toasts.at(-1)).toMatchObject({
+        variant: "warning",
+        message: expect.stringContaining(reason),
+      })
+      const view = await renderSidebar(harness)
+      const frame = await settleFrame(view, reason, 4_000)
+      expect(frame).toContain(`paused · ${reason}`)
+      expect(frame).not.toContain(`on · ${JEV_MODEL_REF}`)
+    },
+  )
+
+  test("Jev reports the server's credential availability instead of a catalog fault", async () => {
+    await writeJson(projectSettingsFile(), { model: JEV_MODEL_REF })
+    await writeJson(activityFile(stateDir(), root), {
+      server: { state: "ready", jevAuth: "missing", time: Date.now() },
+      requests: {},
+    })
+    const harness = makeApi({ baseUrl: "https://remote.example" })
+    await loadTui(harness)
+    const view = await renderSidebar(harness, "ses_1", 80)
+    const frame = await settleFrame(
+      view,
+      "paused · run opencode auth login",
+      4_000,
+    )
+    expect(frame.replace(/\s+/g, " ")).toContain(`paused · ${JEV_AUTH_HINT}`)
+    expect(frame).not.toContain("unavailable here")
+  })
+
+  test("two session slots apply shared Jev auth only to their effective pin", async () => {
+    await writeJson(projectSettingsFile(), {
+      enabled: true,
+      model: JEV_MODEL_REF,
+    })
+    await writeSessionModel(sessionModelPath("ses_chat"), {
+      version: 1,
+      rootSessionID: "ses_chat",
+      revision: "rev_chat",
+      mode: "override",
+      model: "e2e/test",
+      variant: null,
+    })
+    const beacon = async (jevAuth: "available" | "missing") =>
+      writeJson(activityFile(stateDir(), root), {
+        server: { state: "ready", jevAuth, time: Date.now() },
+        requests: {},
+      })
+    await beacon("missing")
+    const harness = makeApi()
+    await loadTui(harness, { feed: false })
+    const view = await testRender(
+      () => [
+        harness.slotPlugins[0]!.slots.sidebar_content(
+          {},
+          { session_id: "ses_jev" },
+        ),
+        harness.slotPlugins[0]!.slots.sidebar_content(
+          {},
+          { session_id: "ses_chat" },
+        ),
+      ],
+      { width: 110, height: 12 },
+    )
+    try {
+      let frame = await settleFrame(view, JEV_AUTH_HINT, 4_000)
+      expect(frame).toContain(`paused · ${JEV_AUTH_HINT}`)
+      expect(frame).toContain("on · e2e/test · this session")
+
+      await beacon("available")
+      frame = await settleFrame(view, `on · ${JEV_MODEL_REF}`, 4_000)
+      expect(frame).toContain("on · e2e/test · this session")
+      expect(frame).not.toContain(JEV_AUTH_HINT)
+
+      await beacon("missing")
+      frame = await settleFrame(view, JEV_AUTH_HINT, 4_000)
+      expect(frame).toContain("on · e2e/test · this session")
+    } finally {
+      await view.renderer.destroy()
+    }
   })
 
   test("a pinned model absent here renders paused-naming-the-model, in warning colour", async () => {

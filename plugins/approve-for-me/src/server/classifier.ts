@@ -3,6 +3,7 @@ import {
   CLASSIFIER_SYSTEM_PROMPT,
   type ClassifierRequest,
   classifierUserPrompt,
+  isJevModel,
   type ModelRef,
   parseVerdict,
   truncate,
@@ -10,6 +11,7 @@ import {
   type Verdict,
 } from "../shared"
 import { SafeCauseError } from "./host"
+import { classifyWithJev } from "./jev"
 
 const CLASSIFIER_SESSION_TITLE = "approve-for-me classifier (throwaway)"
 
@@ -40,7 +42,7 @@ export function classifierMessage(
   }
 }
 
-/** Isolated throwaway-session execution and verdict parsing. */
+/** Redacted classifier dispatch: native Jev or an isolated host session. */
 export function createClassifierPipeline(input: {
   directory: string
   serverUrl: string | URL
@@ -77,6 +79,11 @@ export function createClassifierPipeline(input: {
         source = redactSourceValue(input, request)
       } catch {
         throw new SafeCauseError("source redaction failed")
+      }
+      if (isJevModel(judge.model)) {
+        if (judge.variant)
+          throw new SafeCauseError("Jev does not support model variants")
+        return outcome(await classifyWithJev(source, signal))
       }
       const message = classifierMessage(source, judge)
       const created = (await input.api(

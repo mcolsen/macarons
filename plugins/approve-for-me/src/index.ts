@@ -11,6 +11,7 @@ import {
   createWarnOnceLatch,
   discoverPrimaryRoot,
   discoverWorktreeRoot,
+  every,
   isAllowed,
   narrowestPatterns,
   normalizeRequest,
@@ -34,6 +35,7 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { batchKeyOf, createBatchScheduler } from "./server/batch-scheduler"
 import { createClassifierPipeline } from "./server/classifier"
 import { createHostAdapter, createHostReadCoalescer } from "./server/host"
+import { jevAuth, readJevApiKey, registerJevProvider } from "./server/jev-auth"
 import { createConcurrencyPool } from "./server/pool"
 import {
   ACTIVITY_REASON_MAX,
@@ -51,6 +53,8 @@ import {
   explicitCarveOut,
   formatModelRef,
   hostConfigRoot,
+  isJevModel,
+  JEV_AUTH_HINT,
   legacyProjectSettingsFile,
   listTrustedSessionModels,
   type ModelRef,
@@ -225,6 +229,7 @@ import { settingsLocalityPaths } from "./shared/config-policy"
  */
 
 const MAX_QUEUED = 64
+const JEV_AUTH_REFRESH_MS = 30_000
 const PROJECT_GUIDANCE_FILES = ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"]
 
 // The shared reading of a permission.asked event (see the library's
@@ -501,6 +506,7 @@ export const ApproveForMePlugin: Plugin = async ({
   const activityEntries = new Map<string, ActivityEntry>()
   const activityWrites = createSerialQueue()
   let serverEntry: ServerStatus | undefined
+  let jevAuthState: ServerStatus["jevAuth"]
   let disposed = false
   // Pause ownership is independent: healing one gate must not hide another
   // gate that is still broken or an ancestry barrier that is still pending.
@@ -559,14 +565,15 @@ export const ApproveForMePlugin: Plugin = async ({
   const refreshServerEntry = (): boolean => {
     const reason = serverPauses.values().next().value as string | undefined
     if (
-      reason === undefined
+      serverEntry?.jevAuth === jevAuthState &&
+      (reason === undefined
         ? serverEntry?.state === "ready"
-        : serverEntry?.state === "paused" && serverEntry.reason === reason
+        : serverEntry?.state === "paused" && serverEntry.reason === reason)
     )
       return false
     serverEntry = reason
-      ? { state: "paused", reason, time: Date.now() }
-      : { state: "ready", time: Date.now() }
+      ? { state: "paused", reason, jevAuth: jevAuthState, time: Date.now() }
+      : { state: "ready", jevAuth: jevAuthState, time: Date.now() }
     return true
   }
   const updateServerPause = (key: string, reason?: string): boolean => {
@@ -586,6 +593,28 @@ export const ApproveForMePlugin: Plugin = async ({
   const serverHealed = (file: string, key: string) => {
     if (disposed) return
     if (updateServerPause(key)) flushActivity(file)
+  }
+  // Never cache or publish the key itself, including in error diagnostics.
+  // A failed read is missing, so both the beacon and resolution gate fail closed.
+  const jevCredentialsAvailable = async (): Promise<boolean> => {
+    try {
+      return !!(await readJevApiKey())
+    } catch {
+      return false
+    }
+  }
+  let jevReadinessEpoch = 0
+  let jevAuthRefreshTimer: ReturnType<typeof setInterval> | undefined
+  const refreshJevAuth = async (file: string): Promise<boolean> => {
+    // The timer and prompt resolutions may overlap. Only the latest check can
+    // update the display; each resolution still gates on its own fresh result.
+    const epoch = ++jevReadinessEpoch
+    const available = await jevCredentialsAvailable()
+    if (!disposed && epoch === jevReadinessEpoch) {
+      jevAuthState = available ? "available" : "missing"
+      if (refreshServerEntry()) flushActivity(file)
+    }
+    return available
   }
 
   // The durable approvals journal: what the classifier approved, keyed by the
@@ -808,6 +837,10 @@ export const ApproveForMePlugin: Plugin = async ({
           "the derived permission-store path is not trusted outside the project",
         )
       }
+      // Advertise only availability, not the key. The TUI applies this to
+      // each session's effective pin; no tree can pause an unrelated judge.
+      const packageDir = await ownPackageDir()
+      jevAuthState = (await jevCredentialsAvailable()) ? "available" : "missing"
       // Publish only this factory's beacon. A failed write fails init rather
       // than leaving the sidebar unable to report the server's state.
       refreshServerEntry()
@@ -815,7 +848,13 @@ export const ApproveForMePlugin: Plugin = async ({
         server: serverEntry,
         requests: {},
       })
-      const packageDir = await ownPackageDir()
+      // Refresh the display even when no prompt arrives. Only start after the
+      // instance's activity file exists; the unref'd timer dies on dispose.
+      if (!disposed)
+        jevAuthRefreshTimer = every(() => {
+          if (disposed) return
+          void refreshJevAuth(trusted.activityPath)
+        }, JEV_AUTH_REFRESH_MS)
       return {
         ...trusted,
         ...(packageDir ? { packageDir } : {}),
@@ -1384,6 +1423,9 @@ export const ApproveForMePlugin: Plugin = async ({
   const providerModel = async (
     model: ModelRef,
   ): Promise<Record<string, unknown> | undefined> => {
+    // Jev is a native classifier adapter, not an OpenCode chat provider. It
+    // has no effort variants; credential readiness is checked at resolution.
+    if (isJevModel(model)) return {}
     const list = await providersCatalog()
     if (!list) return undefined
     for (const provider of list) {
@@ -2074,7 +2116,15 @@ export const ApproveForMePlugin: Plugin = async ({
         // model at its default effort, not the configured project model.
         if (model === null) selectedConfigModel = undefined
       }
-      return resolveModel(selectedSettings, selectedConfigModel, modelContext)
+      const resolution = await resolveModel(
+        selectedSettings,
+        selectedConfigModel,
+        modelContext,
+      )
+      const hasJevAuth = await refreshJevAuth(activityPath)
+      if (resolution.judge && isJevModel(resolution.judge.model) && !hasJevAuth)
+        return { failure: JEV_AUTH_HINT }
+      return resolution
     }
     const modelSelectionFingerprint = (
       treeModel: SessionModelReadResult,
@@ -2144,7 +2194,12 @@ export const ApproveForMePlugin: Plugin = async ({
       context,
     )
     if (resolution.failure) {
-      record("undecided", "classifier model unavailable")
+      record(
+        "undecided",
+        resolution.failure === JEV_AUTH_HINT
+          ? JEV_AUTH_HINT
+          : "classifier model unavailable",
+      )
       return "left"
     }
     const judge = resolution.judge
@@ -2430,6 +2485,7 @@ export const ApproveForMePlugin: Plugin = async ({
     // pinning a judge must not quietly forward historical commands to a
     // provider that never saw them.
     const judgeSeesSession =
+      !isJevModel(judge.model) &&
       !!context.model &&
       judge.model.providerID === context.model.providerID &&
       judge.model.modelID === context.model.modelID
@@ -3305,6 +3361,8 @@ export const ApproveForMePlugin: Plugin = async ({
   }, 0)
 
   return {
+    auth: jevAuth,
+    config: registerJevProvider,
     event: async ({ event }) => {
       if (disposed) return
       if (
@@ -3737,6 +3795,7 @@ export const ApproveForMePlugin: Plugin = async ({
       // Pending sweeps die with the instance — their orphans would be gone
       // with it anyway. In-flight ones drain below like journal writes.
       disposed = true
+      if (jevAuthRefreshTimer) clearInterval(jevAuthRefreshTimer)
       const localityDisposed = locality.dispose()
       clearTimeout(sessionModelReconciliationTimer)
       for (const timer of sweepTimers.values()) clearTimeout(timer)

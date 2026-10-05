@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url"
 import {
   BAND_SAMPLE_VERSIONS as BAND,
   legacyPermissionStoreFile,
+  openCodeAuthStorePath,
   openCodeDataDir,
   PERMISSIONS_STORE_DIRECTORY,
   permissionStoreFile,
@@ -22,6 +23,7 @@ import { until } from "@macarons/plugin-test-harness"
 import { DEFAULT_OPTIONS, Redactor } from "../../redact-secrets/src/shared"
 import { ApproveForMePlugin } from "../src/index"
 import { createBatchScheduler } from "../src/server/batch-scheduler"
+import { JEV_AUTH_HINT } from "../src/server/jev-auth"
 import {
   ACTIVITY_REASON_MAX,
   activityFile,
@@ -651,6 +653,618 @@ describe("OpenCode runtime compatibility guard", () => {
     await hooks.event?.(asked())
     expect(replies).toHaveLength(1)
     expect(api.messages()).toHaveLength(1)
+  })
+})
+
+describe("Jev native classifier integration", () => {
+  let previousApiKey: string | undefined
+  let previousAuth: string | undefined
+
+  beforeEach(async () => {
+    previousApiKey = process.env.TYPESAFE_API_KEY
+    previousAuth = process.env.OPENCODE_AUTH_CONTENT
+    process.env.TYPESAFE_API_KEY = "test-jev-server-key"
+    process.env.OPENCODE_AUTH_CONTENT = "{}"
+    await writeGlobalEntry({ model: "typesafe/jev" })
+  })
+
+  afterEach(() => {
+    if (previousApiKey === undefined) delete process.env.TYPESAFE_API_KEY
+    else process.env.TYPESAFE_API_KEY = previousApiKey
+    if (previousAuth === undefined) delete process.env.OPENCODE_AUTH_CONTENT
+    else process.env.OPENCODE_AUTH_CONTENT = previousAuth
+  })
+
+  function jevVerdict(
+    risk: "low" | "medium" | "high" | "critical" = "low",
+    authorization: "none" | "implied" | "clear" = "implied",
+  ) {
+    const choice = (selected: string, choices: string[]) => ({
+      type: "choice",
+      choice: selected,
+      confidence: 1,
+      probabilities: Object.fromEntries(
+        choices.map((value) => [value, value === selected ? 1 : 0]),
+      ),
+    })
+    return {
+      answers: {
+        risk: choice(risk, ["low", "medium", "high", "critical"]),
+        authorization: choice(authorization, ["none", "implied", "clear"]),
+        decision: choice("approve", ["approve", "surface"]),
+      },
+    }
+  }
+
+  function mockJevApi(
+    response: () => Response | Promise<Response> = () =>
+      Response.json(jevVerdict()),
+  ) {
+    const host = mockClassifierApi()
+    const hostFetch = globalThis.fetch
+    const calls: FetchCall[] = []
+    globalThis.fetch = (async (input: any, init?: RequestInit) => {
+      const url = new URL(
+        typeof input === "string" || input instanceof URL
+          ? String(input)
+          : input.url,
+      )
+      if (url.origin === "https://api.typesafe.ai") {
+        calls.push({
+          method: init?.method ?? "GET",
+          pathname: url.pathname,
+          body:
+            typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+        })
+        return response()
+      }
+      // All other requests go to the host mock, never the network.
+      return hostFetch(input, init)
+    }) as typeof fetch
+    return { host, calls }
+  }
+
+  // Drive the real (unref'd) timer without waiting thirty seconds. Restore
+  // the spy before any other test can create an unrelated interval.
+  function captureAuthRefresh() {
+    const native = globalThis.setInterval
+    let tick: (() => void) | undefined
+    let timer: ReturnType<typeof setInterval> | undefined
+    const interval = spyOn(globalThis, "setInterval").mockImplementation(((
+      callback: () => void,
+      ms: number,
+    ) => {
+      const handle = native(callback, ms)
+      if (ms === 30_000) {
+        tick = callback
+        timer = handle
+      }
+      return handle
+    }) as typeof setInterval)
+    return {
+      tick: () => {
+        expect(tick).toBeDefined()
+        tick?.()
+      },
+      timer: () => timer,
+      restore: () => interval.mockRestore(),
+    }
+  }
+
+  test("quiet login and removal refresh the beacon without permission prompts", async () => {
+    delete process.env.TYPESAFE_API_KEY
+    const refresh = captureAuthRefresh()
+    const cleared = spyOn(globalThis, "clearInterval")
+    try {
+      const api = mockJevApi()
+      const { client, logs } = makeClient()
+      const hooks = await load(client)
+      const activity = () =>
+        readActivity(activityFile(stateDir(), root, instanceID))
+      await waitFor(
+        async () => (await activity())?.server?.jevAuth === "missing",
+      )
+      const timer = refresh.timer() as NodeJS.Timeout
+      expect(timer).toBeDefined()
+      expect(timer.hasRef()).toBe(false)
+
+      const secret = "synthetic-quiet-login-key"
+      process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
+        typesafe: { type: "api", key: secret },
+      })
+      refresh.tick()
+      await waitFor(
+        async () => (await activity())?.server?.jevAuth === "available",
+      )
+      expect((await activity())?.server?.state).toBe("ready")
+
+      process.env.OPENCODE_AUTH_CONTENT = "{}"
+      refresh.tick()
+      await waitFor(
+        async () => (await activity())?.server?.jevAuth === "missing",
+      )
+      expect((await activity())?.requests).toEqual({})
+      expect(api.calls).toHaveLength(0)
+      expect(JSON.stringify(await activity())).not.toContain(secret)
+      expect(JSON.stringify(logs)).not.toContain(secret)
+
+      await hooks.dispose?.()
+      expect(cleared).toHaveBeenCalledWith(timer)
+      expect((await activity())?.server).toBeUndefined()
+      refresh.tick() // A callback already queued at shutdown stays inert.
+      await Promise.resolve()
+      expect((await activity())?.server).toBeUndefined()
+    } finally {
+      cleared.mockRestore()
+      refresh.restore()
+    }
+  })
+
+  test("overlapping refreshes and prompt resolution publish only the newest check", async () => {
+    delete process.env.TYPESAFE_API_KEY
+    const previousDataHome = process.env.XDG_DATA_HOME
+    process.env.XDG_DATA_HOME = path.join(sandboxRoot, "data")
+    delete process.env.OPENCODE_AUTH_CONTENT
+    const refresh = captureAuthRefresh()
+    const pendingRead: { release?: (value: string) => void } = {}
+    const releasePendingRead = () => pendingRead.release?.("{}")
+    let oldReadStarted: (() => void) | undefined
+    const oldRead = new Promise<void>((resolve) => {
+      oldReadStarted = resolve
+    })
+    const authPath = openCodeAuthStorePath(process.env, os.homedir())
+    const realReadFile = fs.readFile.bind(fs)
+    let intercept = false
+    let readError = false
+    const readFile = spyOn(fs, "readFile").mockImplementation((async (
+      ...args: Parameters<typeof fs.readFile>
+    ) => {
+      if (String(args[0]) === authPath) {
+        if (intercept) {
+          intercept = false
+          oldReadStarted?.()
+          return new Promise<string>((resolve) => {
+            pendingRead.release = resolve
+          })
+        }
+        if (readError) throw new Error("auth store inaccessible")
+        return JSON.stringify({ typesafe: { type: "api", key: "test-key" } })
+      }
+      return realReadFile(...args)
+    }) as typeof fs.readFile)
+    try {
+      const api = mockJevApi()
+      const { client, replies } = makeClient()
+      const hooks = await load(client)
+      const activity = () =>
+        readActivity(activityFile(stateDir(), root, instanceID))
+      await waitFor(
+        async () => (await activity())?.server?.jevAuth === "available",
+      )
+
+      // An older poll must not overwrite a newer prompt-time check. The
+      // prompt still gates on its own credential read and can classify.
+      intercept = true
+      refresh.tick()
+      await oldRead
+      await trackModel(hooks)
+      await hooks.event?.(asked())
+      expect(api.calls).toHaveLength(1)
+      expect(replies).toHaveLength(1)
+      releasePendingRead()
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect((await activity())?.server?.jevAuth).toBe("available")
+
+      // A failed auth read is reported as missing and cannot authorize the
+      // next prompt, even if the previous beacon said available.
+      readError = true
+      refresh.tick()
+      await waitFor(
+        async () => (await activity())?.server?.jevAuth === "missing",
+      )
+      await trackModel(hooks, "ses_2")
+      await hooks.event?.(asked({ id: "per_2", sessionID: "ses_2" }))
+      expect(api.calls).toHaveLength(1)
+      expect(replies).toHaveLength(1)
+      await waitFor(
+        async () =>
+          (await activity())?.requests.per_2?.reason === JEV_AUTH_HINT,
+      )
+
+      // A late poll cannot revive the beacon after disposal, even if its
+      // credential read was already in flight when the timer was cleared.
+      readError = false
+      intercept = true
+      pendingRead.release = undefined
+      refresh.tick()
+      await waitFor(() => pendingRead.release !== undefined)
+      await hooks.dispose?.()
+      releasePendingRead()
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect((await activity())?.server).toBeUndefined()
+    } finally {
+      releasePendingRead()
+      readFile.mockRestore()
+      refresh.restore()
+      if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME
+      else process.env.XDG_DATA_HOME = previousDataHome
+    }
+  })
+
+  test("a persistent Jev pin publishes credential availability without leaking keys, including after auth changes", async () => {
+    delete process.env.TYPESAFE_API_KEY
+    const api = mockJevApi()
+    const { client, replies, logs } = makeClient({ providers: [] })
+    const hooks = await load(client)
+    const activity = () =>
+      readActivity(activityFile(stateDir(), root, instanceID))
+    await waitFor(async () => (await activity())?.server?.jevAuth === "missing")
+    expect((await activity())?.server?.state).toBe("ready")
+    expect((await activity())?.requests).toEqual({})
+
+    await trackModel(hooks)
+    await hooks.event?.(asked())
+    expect(api.calls).toHaveLength(0)
+    expect(replies).toHaveLength(0)
+    await waitFor(async () => (await activity())?.requests.per_1 !== undefined)
+    expect((await activity())?.requests.per_1?.reason).toBe(JEV_AUTH_HINT)
+
+    const secret = "synthetic-typesafe-regression-key"
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
+      typesafe: { type: "api", key: secret },
+    })
+    await trackModel(hooks, "ses_2")
+    await hooks.event?.(asked({ id: "per_2", sessionID: "ses_2" }))
+    expect(api.calls).toHaveLength(1)
+    expect(replies).toHaveLength(1)
+    await waitFor(
+      async () => (await activity())?.server?.jevAuth === "available",
+    )
+
+    // With the saved key gone, the environment fallback is still usable.
+    process.env.OPENCODE_AUTH_CONTENT = "{}"
+    process.env.TYPESAFE_API_KEY = "synthetic-env-key"
+    await trackModel(hooks, "ses_3")
+    await hooks.event?.(asked({ id: "per_3", sessionID: "ses_3" }))
+    expect(api.calls).toHaveLength(2)
+    expect(replies).toHaveLength(2)
+
+    delete process.env.TYPESAFE_API_KEY
+    await trackModel(hooks, "ses_4")
+    await hooks.event?.(asked({ id: "per_4", sessionID: "ses_4" }))
+    expect(api.calls).toHaveLength(2)
+    expect(replies).toHaveLength(2)
+    await waitFor(async () => (await activity())?.server?.jevAuth === "missing")
+    const feed = await activity()
+    expect(feed?.server?.state).toBe("ready")
+    expect(feed?.requests.per_4?.reason).toBe(JEV_AUTH_HINT)
+    expect(JSON.stringify(feed)).not.toContain(secret)
+    expect(JSON.stringify(logs)).not.toContain(secret)
+  })
+
+  test("session Jev and non-Jev pins remain independently classifiable with missing credentials", async () => {
+    delete process.env.TYPESAFE_API_KEY
+    await writeGlobalEntry({ model: "e2e/test" })
+    const api = mockJevApi()
+    const { client, replies } = makeClient()
+    const hooks = await load(client)
+    const activity = () =>
+      readActivity(activityFile(stateDir(), root, instanceID))
+    await waitFor(async () => (await activity())?.server?.jevAuth === "missing")
+
+    const file = sessionModelFile(sessionModelsDir(), "ses_1")
+    await writeSessionModel(file, {
+      version: 1,
+      rootSessionID: "ses_1",
+      revision: "rev-jev",
+      mode: "override",
+      model: "typesafe/jev",
+      variant: null,
+    })
+    await trackModel(hooks)
+    await hooks.event?.(asked())
+    expect(api.calls).toHaveLength(0)
+    expect(replies).toHaveLength(0)
+    expect((await activity())?.server).toMatchObject({
+      state: "ready",
+      jevAuth: "missing",
+    })
+
+    await writeSessionModel(file, {
+      version: 1,
+      rootSessionID: "ses_1",
+      revision: "rev-chat",
+      mode: "override",
+      model: "e2e/test",
+      variant: null,
+    })
+    await hooks.event?.(replied())
+    await hooks.event?.(asked({ id: "per_chat" }))
+    expect(api.host.messages()).toHaveLength(1)
+    expect(replies).toHaveLength(1)
+    expect((await activity())?.server).toMatchObject({
+      state: "ready",
+      jevAuth: "missing",
+    })
+    // Returning to Jev must still fail closed after the other tree ran.
+    await writeSessionModel(file, {
+      version: 1,
+      rootSessionID: "ses_1",
+      revision: "rev-jev-again",
+      mode: "override",
+      model: "typesafe/jev",
+      variant: null,
+    })
+    await hooks.event?.(asked({ id: "per_jev_again" }))
+    expect(api.calls).toHaveLength(0)
+    expect(replies).toHaveLength(1)
+    expect((await activity())?.server?.jevAuth).toBe("missing")
+  })
+
+  test("a chat session remains active beside a credentialless persistent Jev pin", async () => {
+    delete process.env.TYPESAFE_API_KEY
+    const api = mockJevApi()
+    const { client, replies } = makeClient()
+    const hooks = await load(client)
+    const activity = () =>
+      readActivity(activityFile(stateDir(), root, instanceID))
+    await waitFor(async () => (await activity())?.server?.jevAuth === "missing")
+    const sessionID = "ses_chat"
+    await writeSessionModel(sessionModelFile(sessionModelsDir(), sessionID), {
+      version: 1,
+      rootSessionID: sessionID,
+      revision: "rev-chat",
+      mode: "override",
+      model: "e2e/test",
+      variant: null,
+    })
+    await trackModel(hooks, sessionID)
+    await hooks.event?.(asked({ id: "per_chat", sessionID }))
+    expect(replies).toHaveLength(1)
+    expect(api.host.messages()).toHaveLength(1)
+    expect((await activity())?.server).toMatchObject({
+      state: "ready",
+      jevAuth: "missing",
+    })
+
+    await trackModel(hooks, "ses_jev")
+    await hooks.event?.(asked({ id: "per_jev", sessionID: "ses_jev" }))
+    expect(api.calls).toHaveLength(0)
+    expect(replies).toHaveLength(1)
+    // Activity writes are queued; wait for this request's settled snapshot,
+    // rather than its provisional ancestry pause or the previous ready state.
+    await waitFor(async () => {
+      const feed = await activity()
+      return (
+        feed?.requests.per_jev?.reason === JEV_AUTH_HINT &&
+        feed.server?.state === "ready" &&
+        feed.server.jevAuth === "missing"
+      )
+    })
+    expect((await activity())?.server).toMatchObject({
+      state: "ready",
+      jevAuth: "missing",
+    })
+  })
+
+  test("a pin absent from the host catalog approves once with redacted state and no chat session", async () => {
+    const api = mockJevApi()
+    const { client, replies, logs } = makeClient({ providers: [] })
+    const hooks = await load(client)
+    await trackModel(hooks)
+    const secret = `ghp_${"A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"}`
+    const redactor = new Redactor(DEFAULT_OPTIONS, "jev-test-installation-key")
+    const release = registerSourceRedactor(
+      { directory: root, serverUrl: "http://127.0.0.1:14096" },
+      (snapshot) => {
+        redactor.noteScanContextCached(JSON.stringify(snapshot))
+        redactor.redactValueInPlace(snapshot)
+      },
+    )
+    try {
+      const request = asked({ metadata: { description: `check ${secret}` } })
+      await hooks.event?.(request)
+      await hooks.event?.(request) // Redelivery must not classify or reply twice.
+
+      expect(replies).toHaveLength(1)
+      expect(replies[0]).toMatchObject({
+        path: { id: "ses_1", permissionID: "per_1" },
+        body: { response: "once" },
+      })
+      expect(api.calls).toHaveLength(1)
+      expect(api.calls[0]).toMatchObject({
+        method: "POST",
+        pathname: "/v1/systemone",
+        body: { model: "jev-latest" },
+      })
+      const state = api.calls[0]!.body.state
+      expect(typeof state.request).toBe("string")
+      expect(state.request).toContain("tool: bash")
+      expect(state.request).toContain("git status --short")
+      expect(state.request).toContain("Run the linter and fix warnings")
+      expect(state.request).toContain("[REDACTED-SECRET:")
+      expect(JSON.stringify(state)).not.toContain(secret)
+      expect(api.host.sessions()).toHaveLength(0)
+      expect(api.host.messages()).toHaveLength(0)
+      expect(
+        logs.some((entry) =>
+          String(entry.body.message).includes(
+            "Jev assessed low risk and implied authorization",
+          ),
+        ),
+      ).toBe(true)
+    } finally {
+      release()
+    }
+  })
+
+  test("the policy matrix overrides unsafe approve choices but permits high risk with clear authorization", async () => {
+    let verdict = jevVerdict()
+    const api = mockJevApi(() => Response.json(verdict))
+    const { client, replies, logs } = makeClient()
+    const hooks = await load(client)
+    const cases = [
+      { risk: "high", authorization: "none", approve: false },
+      { risk: "high", authorization: "implied", approve: false },
+      { risk: "critical", authorization: "clear", approve: false },
+      { risk: "high", authorization: "clear", approve: true },
+    ] as const
+    for (const [index, entry] of cases.entries()) {
+      // Separate roots keep a surfaced prompt from parking the next verdict.
+      const sessionID = `ses_matrix_${index}`
+      const id = `per_matrix_${index}`
+      await trackModel(hooks, sessionID)
+      verdict = jevVerdict(entry.risk, entry.authorization)
+      await hooks.event?.(asked({ id, sessionID }))
+      expect(api.calls).toHaveLength(index + 1)
+      expect(replies.some((reply) => reply.path.permissionID === id)).toBe(
+        entry.approve,
+      )
+    }
+    expect(replies).toHaveLength(1)
+    expect(replies[0].body).toEqual({ response: "once" })
+    expect(
+      logs.filter((entry) =>
+        String(entry.body.message).includes(
+          "model decision overridden by policy",
+        ),
+      ),
+    ).toHaveLength(3)
+    expect(api.host.sessions()).toHaveLength(0)
+  })
+
+  test("an explicit ask carve-out prevents a native call", async () => {
+    const api = mockJevApi()
+    const { client, replies, toasts } = makeClient({
+      config: { permission: { bash: { "*": "allow", "git status *": "ask" } } },
+    })
+    const hooks = await load(client)
+    await trackModel(hooks)
+    await hooks.event?.(asked())
+
+    expect(api.calls).toHaveLength(0)
+    expect(api.host.sessions()).toHaveLength(0)
+    expect(replies).toHaveLength(0)
+    expect(toasts).toHaveLength(0)
+  })
+
+  test("an unsupported variant leaves the prompt even when the host advertises it", async () => {
+    await writeGlobalEntry({ model: "typesafe/jev", variant: "high" })
+    const api = mockJevApi()
+    const { client, replies, logs } = makeClient({
+      providers: [
+        { id: "typesafe", models: { jev: { variants: { high: {} } } } },
+      ],
+    })
+    const hooks = await load(client)
+    await trackModel(hooks)
+    await hooks.event?.(asked())
+
+    expect(api.calls).toHaveLength(0)
+    expect(api.host.sessions()).toHaveLength(0)
+    expect(replies).toHaveLength(0)
+    expect(
+      logs.some((entry) =>
+        String(entry.body.message).includes('has no "high" variant'),
+      ),
+    ).toBe(true)
+  })
+
+  test("the separate judge receives tool names without historical tool titles", async () => {
+    const title =
+      "curl -H 'Authorization: Bearer private-history' internal.example"
+    const api = mockJevApi()
+    const { client, replies } = makeClient({
+      messages: {
+        ses_1: [
+          {
+            info: { role: "user", agent: "build" },
+            parts: [{ type: "text", text: "Check the working tree" }],
+          },
+          {
+            info: { role: "assistant" },
+            parts: [{ type: "tool", tool: "bash", state: { title } }],
+          },
+        ],
+      },
+    })
+    const hooks = await load(client)
+    await trackModel(hooks)
+    await hooks.event?.(asked())
+
+    expect(replies).toHaveLength(1)
+    expect(api.calls).toHaveLength(1)
+    const state = api.calls[0]!.body.state.request
+    expect(state).toContain("Check the working tree")
+    expect(state).toContain("git status --short")
+    expect(state).toContain("- bash")
+    expect(state).not.toContain("- bash:")
+    expect(state).not.toContain("private-history")
+    expect(state).not.toContain("internal.example")
+    expect(api.host.sessions()).toHaveLength(0)
+  })
+
+  test("a root-session pin routes natively and changing it invalidates an in-flight approval", async () => {
+    await writeGlobalEntry({ model: "e2e/other", variant: "high" })
+    const file = sessionModelFile(sessionModelsDir(), "ses_1")
+    await writeSessionModel(file, {
+      version: 1,
+      rootSessionID: "ses_1",
+      revision: "rev-jev",
+      mode: "override",
+      model: "typesafe/jev",
+      variant: null,
+    })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const api = mockJevApi(async () => {
+      await gate
+      return Response.json(jevVerdict())
+    })
+    const { client, replies, logs } = makeClient()
+    const hooks = await load(client)
+    await trackModel(hooks)
+    const pending = hooks.event?.(asked())
+    try {
+      await waitFor(() => api.calls.length === 1)
+      expect(api.host.sessions()).toHaveLength(0)
+      expect(replies).toHaveLength(0)
+      await writeSessionModel(file, {
+        version: 1,
+        rootSessionID: "ses_1",
+        revision: "rev-host",
+        mode: "override",
+        model: "e2e/test",
+        variant: null,
+      })
+    } finally {
+      release()
+      await pending
+    }
+
+    expect(replies).toHaveLength(0)
+    expect(
+      logs.some((entry) =>
+        String(entry.body.message).includes("changed while"),
+      ),
+    ).toBe(true)
+    // Settle the old prompt before checking that the live pin routes the next.
+    await hooks.event?.(replied())
+    await hooks.event?.(asked({ id: "per_after_pin_change" }))
+    expect(api.calls).toHaveLength(1)
+    expect(api.host.messages()).toHaveLength(1)
+    expect(api.host.messages()[0]!.body.model).toEqual({
+      providerID: "e2e",
+      modelID: "test",
+    })
+    expect(api.host.messages()[0]!.body.variant).toBeUndefined()
+    expect(replies).toHaveLength(1)
+    expect(replies[0]).toMatchObject({
+      path: { id: "ses_1", permissionID: "per_after_pin_change" },
+      body: { response: "once" },
+    })
   })
 })
 

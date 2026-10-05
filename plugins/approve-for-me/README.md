@@ -6,12 +6,21 @@ The classifier model is yours to choose from every model available in your OpenC
 
 ## How it works
 
+Alongside OpenCode's model catalog, the classifier picker supports
+[TypeSafe's Jev](#jev-typesafe) through its native typed-classification API.
+
 OpenCode's server emits an event for every permission prompt. For each one, the plugin:
 
 1. **Checks that Approve for Me should act at all.** The merged settings must say enabled, the instance toggle must not say paused, and the permission type must not be opted out.
 2. **Applies your explicit rules first — they always beat the model.** The plugin reconstructs the same ruleset OpenCode itself evaluated for the request: the active agent's resolved rules (which fold in the merged config `permission` block and any per-agent `permission` overrides) plus the session's own rules. A matching non-blanket **ask/deny** rule anywhere in that effective ruleset (`"git push *": "ask"`, including one an agent definition added) makes the prompt always surface; the classifier is not even consulted. The tool-wide blanket that turns prompting on in the first place (`"bash": "ask"`, `"edit": "ask"`, a `"*"` entry) is *not* a carve-out — it is exactly the decision being delegated — and it cannot shadow one either: a blanket ask that lands after your carve-out (say, a session-wide ask following an agent's `"git push *": "ask"`) leaves the carve-out standing, while a later matching **allow** genuinely cancels it, just as it does for OpenCode itself — [Carve-outs and rule order](#carve-outs-and-rule-order) below spells out every ordering. persist-permissions' `permissions.local.json` is stricter still: OpenCode never enforces that file itself, so **any** matching non-allow rule there vetoes, blanket included (`"bash": "deny"` means no bash approval, ever). If the active agent or either ruleset cannot be established, auto-approval pauses for that request. Requests the store already **allows** are skipped too: re-approving them is [persist-permissions](../persist-permissions)' job and needs no model call.
 3. **Asks the classifier.** The request (tool, patterns, title, metadata such as the full command) is sent to a throwaway OpenCode session created with a deny-everything permission ruleset and all tools disabled, together with the conversation context the judge needs: a bounded window of **your own messages** from the session and a short trail of the agent's recent **tool calls**. The history read is itself bounded — the newest 200 messages, never a full-session hydration — and the message window keeps the first and most recent messages while earlier ones fill a ~6k-character budget newest-first, with one marker for anything omitted (when even the 200-message page is full, the window declares that older messages could not be retrieved instead of presenting an arbitrary message as the session's start). Tool outputs and assistant prose are excluded wholesale — they are the prime prompt-injection vectors, and the tool trail alone gives the judge the workflow arc. The trail carries full titles (for a shell call, the whole command line) **only when the judge is the session's own model**, whose provider already processes the entire session; a judge pinned to any other model receives tool names only, so pinning a cheaper judge never forwards your historical commands to a provider that hasn't seen them. Each request also carries a short plugin-authored description of the tool that raised it (what `todowrite` actually touches, what the patterns mean for that tool), so the judge never guesses at OpenCode's tool semantics. Unknown or third-party tools (MCP servers, code-mode calls) raise their permission as a bare name with no arguments; the plugin recovers the pending call's actual arguments through the event's tool pointer and shows them to the judge — and if nothing concrete can be shown (no real patterns, no metadata, no recoverable arguments), the request is **never classified** and simply stays on screen. Text that a project command template expanded into the conversation is likewise never presented as your words: the judge sees the invocation you actually typed (`/deploy prod`), not the repository-defined template. The verdict comes back as strict JSON grading two axes — `{"risk":…,"authorization":…,"decision":…,"reason":…}`, see [the verdict](#the-verdict-risk--authorization) below. The plugin replaces that session's inherited system stream with its fixed classifier policy, so the normal agent prompt, project instructions, skills, and MCP instructions cannot redefine the judge. The first project-root `AGENTS.md` / `CLAUDE.md` / `CONTEXT.md` found is still supplied as bounded, explicitly untrusted context. The throwaway session is deleted afterwards. When the request comes from a sub-agent, the user-message window still comes from the root session; the sub-agent's own prompt is included separately as agent-authored, untrusted subtask text, and the tool trail is the requesting session's own.
 4. **Acts on the verdict.** The risk × authorization policy matrix — enforced in plugin code, not by model obedience — decides whether the verdict may approve. An approval answers the prompt with **"once"** — never "always". A surface verdict, a model error, a timeout, an unparseable verdict, or a model that no longer exists all do exactly nothing: the prompt stays, you decide — though if nobody decides for [`unattendedDenyMs`](#when-nobody-answers-the-unattended-deny-timer) (default 20 minutes), a prompt the classifier surfaced or failed on is denied outright so an unattended session is not held hostage. The whole exchange is visible in the TUI: a stand-by toast the moment the request goes to the model (`Approve for Me is evaluating bash: git status --short…`), then a decision toast (`Approved bash: git status --short`, `Needs your approval — pushes to a remote`) — the classifier never acts invisibly. The same lifecycle is mirrored in the [sidebar activity stream](#the-sidebar-status-and-activity-stream), which — unlike a toast — does not scroll away while prompts arrive in bursts.
+
+The throwaway-session transport in step 3 applies to OpenCode chat models.
+Jev receives the same bounded request context directly through TypeSafe's API,
+with the classifier policy in shared state referenced by its typed questions.
+It has no tools or inherited host system prompt. The same rule checks, source redaction,
+approval matrix, cancellation, and ordered approval release apply.
 
 When the current [redact-secrets](../redact-secrets) plugin is enabled in the
 same OpenCode instance, complete classifier source values are redacted before
@@ -176,6 +185,134 @@ By default the classifier is **the model the asking session is currently using**
 A project/global pinned model that is no longer available **pauses auto-approval** (with a warning toast) rather than silently falling back to a model you never chose to trust. An unavailable or malformed session-scoped pin pauses only that session tree.
 
 Session-scoped pins require a working `O_NOFOLLOW` open flag and stable filesystem inode identities. On platforms or state filesystems without those capabilities, the plugin warns once and leaves session-scoped pins unavailable; project/global classifier settings continue to work.
+
+### Jev (TypeSafe)
+
+Choose **Jev** in the **TypeSafe** category of the classifier picker, at any
+of the usual session/project/global scopes. Or set these plugin options:
+
+```json
+{
+  "model": "typesafe/jev",
+  "variant": null
+}
+```
+
+To save your TypeSafe API key through OpenCode:
+
+1. Run this command from a directory where the plugin is installed, using the
+   server's user/home and `XDG_DATA_HOME`, and enter your TypeSafe API key when
+   prompted:
+
+   ```bash
+   opencode auth login --provider typesafe
+   ```
+
+   The interactive `opencode auth login` picker also lists **TypeSafe (Jev)**.
+   TypeSafe must be absent from `disabled_providers` and included in
+   `enabled_providers` if you use that allowlist.
+2. Quit and restart OpenCode and attached TUIs after installing the updated plugin.
+3. Choose **Jev** in Approve for Me's classifier picker.
+
+In the stock TUI, use **`/connect` → Other**, enter provider ID **`typesafe`**,
+then enter the API key. The named `/connect` list filters out providers with no
+chat models; Jev remains available in this plugin's classifier picker.
+
+OpenCode stores the key under the `typesafe` provider in its normal server-side
+credential store (`~/.local/share/opencode/auth.json` by default, respecting
+`XDG_DATA_HOME`). With an attached TUI, `/connect` saves it on the attached
+server. With file-backed credentials, connecting, replacing, or removing a saved
+key takes effect on the next classification. The server reports key availability
+at startup, refreshes it every 30 seconds even without permission prompts, and
+checks it again when resolving a classifier for a permission request. A
+Jev-pinned session without a key shows **paused**, with the login hint in its
+sidebar; sessions using other judges remain independent. Adding or removing a
+key normally updates the sidebar and usage-limits classifier section on the
+next 30-second refresh (plus credential-read and activity-write latency), or
+sooner when a prompt resolves its model. Classification always reads fresh
+credentials rather than relying on the displayed availability.
+
+`TYPESAFE_API_KEY` in the **OpenCode server process's environment** also works
+as a fallback. A saved TypeSafe API key takes precedence; removing that saved
+key resumes the environment fallback if one is set. A nonempty, valid JSON
+`OPENCODE_AUTH_CONTENT` overrides the credential file, so file changes do not
+affect that inline store. For an interactive Bash launch:
+
+```bash
+read -rsp "TypeSafe API key: " TYPESAFE_API_KEY; printf '\n'
+export TYPESAFE_API_KEY
+opencode
+```
+
+Restart the server after changing its launch environment. For a service-managed
+server, set the variable in that service's environment.
+
+`typesafe/jev` is a classifier-only model reference provided by this plugin;
+it needs no OpenCode chat-provider configuration. It calls
+[`POST https://api.typesafe.ai/v1/systemone`](https://docs.typesafe.ai/api)
+with the API model alias `jev-latest`. Jev has no effort variants: the picker
+clears an earlier variant pin, and a manually configured non-default variant
+leaves prompts for you.
+
+In every OpenCode instance where it is installed, this plugin uses the provider
+ID `typesafe` for authentication and reserves `typesafe/jev` for its native
+classifier adapter. Existing provider configuration is preserved, but a host
+chat model with that exact reference is hidden in the classifier picker and
+resolves to the native adapter even through **Session model**. If official
+TypeSafe OpenCode chat models appear under that reference, this integration
+will need a catalog-aware fallback or a documented migration before they can
+be used as chat-based judges.
+
+Each request asks three independent **Choice** questions: risk, authorization,
+and approve/surface. The structured `state` contains one copy of the full
+classifier policy in `policy`, alongside the bounded request context in
+`request`. Each question uses short instructions referring to that shared
+policy and explicitly treats request content as data, not policy instructions.
+This avoids sending the same policy three times: the synthetic `git status`
+fixture's JSON body falls from 45,551 to 16,892 characters (about 63% smaller). These are payload
+sizes, not measured Jev token counts. TypeSafe documents that
+[batched questions pay for shared state once](https://docs.typesafe.ai/cookbooks/parallel_questions);
+[pricing is input-token-only](https://docs.typesafe.ai/models), with output free.
+
+The plugin validates the typed answers and probability distributions, then
+applies the existing risk × authorization matrix; Jev's surface choice can
+make the outcome stricter. Confidence is validated but does not introduce an
+additional approval threshold. Probability comparisons tolerate machine-precision rounding
+at tied choices; derived confidence gets the same eight-epsilon allowance at
+the endpoints of [0, 1]. Each probability must still lie in [0, 1], the
+distribution must sum to 1 within 0.001, and the selected choice must be a
+highest-probability option, as required by the TypeSafe API contract. Invalid
+answers identify the failing question and validation check in the activity
+stream and server log, without logging provider response
+text. Jev does not generate free-text explanations, so activity
+and journal reasons summarize its selected grades and any manual-review choice.
+
+The request includes the same bounded user-message window, current permission
+details, and untrusted project guidance described above. Historical tool calls
+are names-only. The optional co-installed secret redactor runs before any
+excerpt is cut or sent to TypeSafe. Missing credentials, API errors, malformed
+answers, and timeouts leave the prompt for you, with a failure reason in the
+activity stream. Requests share `timeoutMs` and the
+plugin's concurrency limit. HTTP 429 (rate limited) and 529 (overloaded) receive
+one retry after a jittered 250–500 ms backoff; the wait and both attempts share
+the original classification deadline and stop when you answer the prompt. A
+second failure leaves the prompt for you. Other HTTP errors, transport failures,
+and invalid responses are not retried.
+
+A live smoke call on 2026-10-05 (UTC) sent the current shared-policy payload
+through the production adapter with a synthetic `git status` permission request
+and returned HTTP 200 from `jev-1.13.0` on its first attempt. It selected low
+risk, clear authorization, and approve; its probabilities passed the
+normalization and highest-probability checks without adjustment. The service
+reported 3,477 input tokens and 109 output tokens for this call. The request
+inputs, exact wire-body SHA-256 fingerprint, HTTP status, and returned answer
+fields are recorded in
+[`test/fixtures/jev-live-smoke.json`](test/fixtures/jev-live-smoke.json)
+and replayed through the classifier pipeline in CI. The replay checks the
+outgoing body against the captured fingerprint, so a request change requires
+refreshing the smoke capture rather than silently retaining stale validation.
+CI uses the recorded response and needs no live credential; the capture is
+evidence of this one live call, not a continuing service-availability check.
 
 ### Effort level (model variants)
 

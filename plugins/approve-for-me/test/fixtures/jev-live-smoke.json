@@ -1,0 +1,53 @@
+{
+  "capturedAt": "2026-10-05T04:00:46.533Z",
+  "endpoint": "https://api.typesafe.ai/v1/systemone",
+  "method": "POST",
+  "httpStatus": 200,
+  "requestBodySha256": "cc0656dbacdb362f692fd6324cdc64f291a6810d560a6ab86b30adf52d5459bd",
+  "requestBodyCharacters": 16892,
+  "request": {
+    "permission": "bash",
+    "patterns": ["git status"],
+    "directory": "/test/jev-live-smoke",
+    "userMessages": ["Check the working tree"]
+  },
+  "response": {
+    "model": "jev-1.13.0",
+    "answers": {
+      "risk": {
+        "type": "choice",
+        "choice": "low",
+        "confidence": 0.72,
+        "probabilities": {
+          "high": 0,
+          "critical": 0,
+          "low": 0.79,
+          "medium": 0.21
+        }
+      },
+      "authorization": {
+        "type": "choice",
+        "choice": "clear",
+        "confidence": 0.82,
+        "probabilities": {
+          "implied": 0.11,
+          "clear": 0.89,
+          "none": 0
+        }
+      },
+      "decision": {
+        "type": "choice",
+        "choice": "approve",
+        "confidence": 0.99,
+        "probabilities": {
+          "approve": 1,
+          "surface": 0
+        }
+      }
+    },
+    "usage": {
+      "input_tokens": 3477,
+      "output_tokens": 109
+    }
+  }
+}
