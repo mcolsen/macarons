@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url"
 import {
   BAND_SAMPLE_VERSIONS as BAND,
   legacyPermissionStoreFile,
+  openCodeAuthStorePath,
   openCodeDataDir,
   PERMISSIONS_STORE_DIRECTORY,
   permissionStoreFile,
@@ -722,6 +723,173 @@ describe("Jev native classifier integration", () => {
     }) as typeof fetch
     return { host, calls }
   }
+
+  // Drive the real (unref'd) timer without waiting thirty seconds. Restore
+  // the spy before any other test can create an unrelated interval.
+  function captureAuthRefresh() {
+    const native = globalThis.setInterval
+    let tick: (() => void) | undefined
+    let timer: ReturnType<typeof setInterval> | undefined
+    const interval = spyOn(globalThis, "setInterval").mockImplementation(((
+      callback: () => void,
+      ms: number,
+    ) => {
+      const handle = native(callback, ms)
+      if (ms === 30_000) {
+        tick = callback
+        timer = handle
+      }
+      return handle
+    }) as typeof setInterval)
+    return {
+      tick: () => {
+        expect(tick).toBeDefined()
+        tick?.()
+      },
+      timer: () => timer,
+      restore: () => interval.mockRestore(),
+    }
+  }
+
+  test("quiet login and removal refresh the beacon without permission prompts", async () => {
+    delete process.env.TYPESAFE_API_KEY
+    const refresh = captureAuthRefresh()
+    const cleared = spyOn(globalThis, "clearInterval")
+    try {
+      const api = mockJevApi()
+      const { client, logs } = makeClient()
+      const hooks = await load(client)
+      const activity = () =>
+        readActivity(activityFile(stateDir(), root, instanceID))
+      await waitFor(
+        async () => (await activity())?.server?.jevAuth === "missing",
+      )
+      const timer = refresh.timer() as NodeJS.Timeout
+      expect(timer).toBeDefined()
+      expect(timer.hasRef()).toBe(false)
+
+      const secret = "synthetic-quiet-login-key"
+      process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
+        typesafe: { type: "api", key: secret },
+      })
+      refresh.tick()
+      await waitFor(
+        async () => (await activity())?.server?.jevAuth === "available",
+      )
+      expect((await activity())?.server?.state).toBe("ready")
+
+      process.env.OPENCODE_AUTH_CONTENT = "{}"
+      refresh.tick()
+      await waitFor(
+        async () => (await activity())?.server?.jevAuth === "missing",
+      )
+      expect((await activity())?.requests).toEqual({})
+      expect(api.calls).toHaveLength(0)
+      expect(JSON.stringify(await activity())).not.toContain(secret)
+      expect(JSON.stringify(logs)).not.toContain(secret)
+
+      await hooks.dispose?.()
+      expect(cleared).toHaveBeenCalledWith(timer)
+      expect((await activity())?.server).toBeUndefined()
+      refresh.tick() // A callback already queued at shutdown stays inert.
+      await Promise.resolve()
+      expect((await activity())?.server).toBeUndefined()
+    } finally {
+      cleared.mockRestore()
+      refresh.restore()
+    }
+  })
+
+  test("overlapping refreshes and prompt resolution publish only the newest check", async () => {
+    delete process.env.TYPESAFE_API_KEY
+    const previousDataHome = process.env.XDG_DATA_HOME
+    process.env.XDG_DATA_HOME = path.join(sandboxRoot, "data")
+    delete process.env.OPENCODE_AUTH_CONTENT
+    const refresh = captureAuthRefresh()
+    const pendingRead: { release?: (value: string) => void } = {}
+    const releasePendingRead = () => pendingRead.release?.("{}")
+    let oldReadStarted: (() => void) | undefined
+    const oldRead = new Promise<void>((resolve) => {
+      oldReadStarted = resolve
+    })
+    const authPath = openCodeAuthStorePath(process.env, os.homedir())
+    const realReadFile = fs.readFile.bind(fs)
+    let intercept = false
+    let readError = false
+    const readFile = spyOn(fs, "readFile").mockImplementation((async (
+      ...args: Parameters<typeof fs.readFile>
+    ) => {
+      if (String(args[0]) === authPath) {
+        if (intercept) {
+          intercept = false
+          oldReadStarted?.()
+          return new Promise<string>((resolve) => {
+            pendingRead.release = resolve
+          })
+        }
+        if (readError) throw new Error("auth store inaccessible")
+        return JSON.stringify({ typesafe: { type: "api", key: "test-key" } })
+      }
+      return realReadFile(...args)
+    }) as typeof fs.readFile)
+    try {
+      const api = mockJevApi()
+      const { client, replies } = makeClient()
+      const hooks = await load(client)
+      const activity = () =>
+        readActivity(activityFile(stateDir(), root, instanceID))
+      await waitFor(
+        async () => (await activity())?.server?.jevAuth === "available",
+      )
+
+      // An older poll must not overwrite a newer prompt-time check. The
+      // prompt still gates on its own credential read and can classify.
+      intercept = true
+      refresh.tick()
+      await oldRead
+      await trackModel(hooks)
+      await hooks.event?.(asked())
+      expect(api.calls).toHaveLength(1)
+      expect(replies).toHaveLength(1)
+      releasePendingRead()
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect((await activity())?.server?.jevAuth).toBe("available")
+
+      // A failed auth read is reported as missing and cannot authorize the
+      // next prompt, even if the previous beacon said available.
+      readError = true
+      refresh.tick()
+      await waitFor(
+        async () => (await activity())?.server?.jevAuth === "missing",
+      )
+      await trackModel(hooks, "ses_2")
+      await hooks.event?.(asked({ id: "per_2", sessionID: "ses_2" }))
+      expect(api.calls).toHaveLength(1)
+      expect(replies).toHaveLength(1)
+      await waitFor(
+        async () =>
+          (await activity())?.requests.per_2?.reason === JEV_AUTH_HINT,
+      )
+
+      // A late poll cannot revive the beacon after disposal, even if its
+      // credential read was already in flight when the timer was cleared.
+      readError = false
+      intercept = true
+      pendingRead.release = undefined
+      refresh.tick()
+      await waitFor(() => pendingRead.release !== undefined)
+      await hooks.dispose?.()
+      releasePendingRead()
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect((await activity())?.server).toBeUndefined()
+    } finally {
+      releasePendingRead()
+      readFile.mockRestore()
+      refresh.restore()
+      if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME
+      else process.env.XDG_DATA_HOME = previousDataHome
+    }
+  })
 
   test("a persistent Jev pin publishes credential availability without leaking keys, including after auth changes", async () => {
     delete process.env.TYPESAFE_API_KEY

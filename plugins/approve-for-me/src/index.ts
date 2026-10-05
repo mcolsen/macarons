@@ -11,6 +11,7 @@ import {
   createWarnOnceLatch,
   discoverPrimaryRoot,
   discoverWorktreeRoot,
+  every,
   isAllowed,
   narrowestPatterns,
   normalizeRequest,
@@ -228,6 +229,7 @@ import { settingsLocalityPaths } from "./shared/config-policy"
  */
 
 const MAX_QUEUED = 64
+const JEV_AUTH_REFRESH_MS = 30_000
 const PROJECT_GUIDANCE_FILES = ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"]
 
 // The shared reading of a permission.asked event (see the library's
@@ -592,8 +594,8 @@ export const ApproveForMePlugin: Plugin = async ({
     if (disposed) return
     if (updateServerPause(key)) flushActivity(file)
   }
-  // Auth-store and environment changes must be observed on each resolution;
-  // never cache or publish the key itself, including in error diagnostics.
+  // Never cache or publish the key itself, including in error diagnostics.
+  // A failed read is missing, so both the beacon and resolution gate fail closed.
   const jevCredentialsAvailable = async (): Promise<boolean> => {
     try {
       return !!(await readJevApiKey())
@@ -602,6 +604,18 @@ export const ApproveForMePlugin: Plugin = async ({
     }
   }
   let jevReadinessEpoch = 0
+  let jevAuthRefreshTimer: ReturnType<typeof setInterval> | undefined
+  const refreshJevAuth = async (file: string): Promise<boolean> => {
+    // The timer and prompt resolutions may overlap. Only the latest check can
+    // update the display; each resolution still gates on its own fresh result.
+    const epoch = ++jevReadinessEpoch
+    const available = await jevCredentialsAvailable()
+    if (!disposed && epoch === jevReadinessEpoch) {
+      jevAuthState = available ? "available" : "missing"
+      if (refreshServerEntry()) flushActivity(file)
+    }
+    return available
+  }
 
   // The durable approvals journal: what the classifier approved, keyed by the
   // narrowest persistent pattern (what persist-permissions would save for an
@@ -834,6 +848,13 @@ export const ApproveForMePlugin: Plugin = async ({
         server: serverEntry,
         requests: {},
       })
+      // Refresh the display even when no prompt arrives. Only start after the
+      // instance's activity file exists; the unref'd timer dies on dispose.
+      if (!disposed)
+        jevAuthRefreshTimer = every(() => {
+          if (disposed) return
+          void refreshJevAuth(trusted.activityPath)
+        }, JEV_AUTH_REFRESH_MS)
       return {
         ...trusted,
         ...(packageDir ? { packageDir } : {}),
@@ -2100,14 +2121,7 @@ export const ApproveForMePlugin: Plugin = async ({
         selectedConfigModel,
         modelContext,
       )
-      // Concurrent prompt trees can resolve against different auth snapshots.
-      // Only the newest check may publish availability to the shared beacon.
-      const epoch = ++jevReadinessEpoch
-      const hasJevAuth = await jevCredentialsAvailable()
-      if (epoch === jevReadinessEpoch) {
-        jevAuthState = hasJevAuth ? "available" : "missing"
-        if (refreshServerEntry()) flushActivity(activityPath)
-      }
+      const hasJevAuth = await refreshJevAuth(activityPath)
       if (resolution.judge && isJevModel(resolution.judge.model) && !hasJevAuth)
         return { failure: JEV_AUTH_HINT }
       return resolution
@@ -3781,6 +3795,7 @@ export const ApproveForMePlugin: Plugin = async ({
       // Pending sweeps die with the instance — their orphans would be gone
       // with it anyway. In-flight ones drain below like journal writes.
       disposed = true
+      if (jevAuthRefreshTimer) clearInterval(jevAuthRefreshTimer)
       const localityDisposed = locality.dispose()
       clearTimeout(sessionModelReconciliationTimer)
       for (const timer of sweepTimers.values()) clearTimeout(timer)

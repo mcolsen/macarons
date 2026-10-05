@@ -18,8 +18,8 @@ OpenCode's server emits an event for every permission prompt. For each one, the 
 
 The throwaway-session transport in step 3 applies to OpenCode chat models.
 Jev receives the same bounded request context directly through TypeSafe's API,
-with the classifier policy in its typed question instructions. It has no tools
-or inherited host system prompt. The same rule checks, source redaction,
+with the classifier policy in shared state referenced by its typed questions.
+It has no tools or inherited host system prompt. The same rule checks, source redaction,
 approval matrix, cancellation, and ordered approval release apply.
 
 When the current [redact-secrets](../redact-secrets) plugin is enabled in the
@@ -223,11 +223,14 @@ credential store (`~/.local/share/opencode/auth.json` by default, respecting
 `XDG_DATA_HOME`). With an attached TUI, `/connect` saves it on the attached
 server. With file-backed credentials, connecting, replacing, or removing a saved
 key takes effect on the next classification. The server reports key availability
-at startup and checks it again when resolving a classifier for a permission
-request. A Jev-pinned session without a key shows **paused**, with the login hint
-in its sidebar; sessions using other judges remain independent. Adding or
-removing a key updates the sidebar on the next model resolution. Until then, a
-new session pin uses the server's last credential-availability observation.
+at startup, refreshes it every 30 seconds even without permission prompts, and
+checks it again when resolving a classifier for a permission request. A
+Jev-pinned session without a key shows **paused**, with the login hint in its
+sidebar; sessions using other judges remain independent. Adding or removing a
+key normally updates the sidebar and usage-limits classifier section on the
+next 30-second refresh (plus credential-read and activity-write latency), or
+sooner when a prompt resolves its model. Classification always reads fresh
+credentials rather than relying on the displayed availability.
 
 `TYPESAFE_API_KEY` in the **OpenCode server process's environment** also works
 as a fallback. A saved TypeSafe API key takes precedence; removing that saved
@@ -250,6 +253,15 @@ it needs no OpenCode chat-provider configuration. It calls
 with the API model alias `jev-latest`. Jev has no effort variants: the picker
 clears an earlier variant pin, and a manually configured non-default variant
 leaves prompts for you.
+
+In every OpenCode instance where it is installed, this plugin uses the provider
+ID `typesafe` for authentication and reserves `typesafe/jev` for its native
+classifier adapter. Existing provider configuration is preserved, but a host
+chat model with that exact reference is hidden in the classifier picker and
+resolves to the native adapter even through **Session model**. If official
+TypeSafe OpenCode chat models appear under that reference, this integration
+will need a catalog-aware fallback or a documented migration before they can
+be used as chat-based judges.
 
 Each request asks three independent **Choice** questions: risk, authorization,
 and approve/surface. The structured `state` contains one copy of the full
@@ -287,15 +299,20 @@ the original classification deadline and stop when you answer the prompt. A
 second failure leaves the prompt for you. Other HTTP errors, transport failures,
 and invalid responses are not retried.
 
-A live smoke call on 2026-10-04 used the earlier request format (policy repeated
-per question) with a synthetic `git status` permission request and returned
-HTTP 200 from `jev-1.13.0`. Its probabilities passed the normalization and
-highest-probability checks without adjustment. The request inputs and returned
-answer fields are recorded in
+A live smoke call on 2026-10-05 (UTC) sent the current shared-policy payload
+through the production adapter with a synthetic `git status` permission request
+and returned HTTP 200 from `jev-1.13.0` on its first attempt. It selected low
+risk, clear authorization, and approve; its probabilities passed the
+normalization and highest-probability checks without adjustment. The service
+reported 3,477 input tokens and 109 output tokens for this call. The request
+inputs, exact wire-body SHA-256 fingerprint, HTTP status, and returned answer
+fields are recorded in
 [`test/fixtures/jev-live-smoke.json`](test/fixtures/jev-live-smoke.json)
-and replayed through the classifier pipeline in CI; no live credential is
-required by the tests. This fixture validates response parsing, not live
-classification or token usage with the shared-policy request format.
+and replayed through the classifier pipeline in CI. The replay checks the
+outgoing body against the captured fingerprint, so a request change requires
+refreshing the smoke capture rather than silently retaining stale validation.
+CI uses the recorded response and needs no live credential; the capture is
+evidence of this one live call, not a continuing service-availability check.
 
 ### Effort level (model variants)
 

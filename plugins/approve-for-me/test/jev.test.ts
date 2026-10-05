@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import { registerSourceRedactor } from "@macarons/permission-rules"
 import { until } from "@macarons/plugin-test-harness"
 import { createClassifierPipeline } from "../src/server/classifier"
@@ -93,10 +94,12 @@ function harness(
 }
 
 describe("Jev adapter", () => {
-  test("accepts the captured live TypeSafe response through the production pipeline", async () => {
-    // HTTP 200 on 2026-10-04, before policy deduplication. Only synthetic
-    // request text was sent; this replays the answer, not a live request.
-    const api = harness(() => Response.json(liveSmoke.response))
+  test("matches the live request fingerprint and accepts its captured response through the production pipeline", async () => {
+    // Only synthetic request text was sent. Pin the exact captured wire body
+    // so request changes cannot silently inherit an older smoke validation.
+    const api = harness(() =>
+      Response.json(liveSmoke.response, { status: liveSmoke.httpStatus }),
+    )
     const result = await api.classify(
       liveSmoke.request,
       judge,
@@ -109,9 +112,14 @@ describe("Jev adapter", () => {
       decision: "approve",
       reason: "Jev assessed low risk and clear authorization",
     })
-    expect(api.calls[0]!.url).toBe(liveSmoke.endpoint)
-    expect(JSON.parse(api.calls[0]!.init.body as string)).toEqual(
-      jevRequest(liveSmoke.request),
+    expect(api.calls).toHaveLength(1)
+    const { url, init } = api.calls[0]!
+    expect(url).toBe(liveSmoke.endpoint)
+    expect(init.method).toBe(liveSmoke.method)
+    const body = init.body as string
+    expect(body.length).toBe(liveSmoke.requestBodyCharacters)
+    expect(createHash("sha256").update(body).digest("hex")).toBe(
+      liveSmoke.requestBodySha256,
     )
   })
 
