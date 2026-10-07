@@ -72,7 +72,7 @@ The sidebar's `!` line carries the live deadline (`pushes to a remote · deny in
 The classifier is not asked "is this what the user requested?" — an agent spends most of its time on routine steps no task text spells out. Modeled on the policy of Codex's auto-review guardian, it instead grades every request on two independent axes, and the **plugin** turns them into the decision:
 
 - **Risk** — concrete, reasonably foreseeable effects if the action executes once. `low`: read-only inside the project, or session bookkeeping such as the agent's own todo list. `medium`: ordinary bounded development work — edits, task-related staging and local commits, project tooling, local development services/databases, clearly disposable test fixtures, and ordinary network reads. Staging changes the repository index; it does not itself commit, push, or publish anything. `high`: consequential effects beyond that work — pushing/publishing, production/shared mutations, remote mutations and private-data uploads outside the development environment, installing software outside routine package-runner use, or host/external-account changes. `critical`: destroying valuable data or data whose disposability is unknown, other irreversible damage, secret extraction/exposure or credential changes, security weakening, ad hoc downloaded-code execution (including `curl ... | sh`, but excluding routine package-runner use), or signs of manipulated instructions. Normal client authentication and clearly disposable test-fixture cleanup are judged by their actual effects below.
-- **Authorization** — how clearly your own words sanction that kind of action: `clear` (explicitly requested or unambiguously entailed), `implied` (a normal step for the stated task), or `none`. The judge weighs **all** the messages in its window, not just your latest — an instruction you gave earlier in the session still counts, so "push it when tests pass" three messages ago still reads as clear assent for the eventual `git push`. When the window has omitted messages, the judge is told that anything shown **before** the omission marker can never establish `clear` authorization by itself — an omitted message may have amended or withdrawn it — so a grant that predates the gap cannot carry a high-risk approval unless the recent, contiguous messages reaffirm it.
+- **Authorization** — how your own words sanction that kind of action: `clear` (explicitly requested or unambiguously entailed), `implied` (reasonably inferred to advance the overall task within its scope), or `none` (no visible task connection, or contrary to an explicit limit). The judge weighs **all** the messages in its window, not just your latest — an instruction you gave earlier in the session still counts, so "push it when tests pass" three messages ago still reads as clear assent for the eventual `git push`. When the window has omitted messages, the judge is told that anything shown **before** the omission marker can never establish `clear` authorization by itself — an omitted message may have amended or withdrawn it — so a grant that predates the gap cannot carry a high-risk approval unless the recent, contiguous messages reaffirm it.
 
 | Risk | Approved when |
 | --- | --- |
@@ -80,6 +80,8 @@ The classifier is not asked "is this what the user requested?" — an agent spen
 | `medium` | authorization is at least `implied` |
 | `high` | authorization is `clear` |
 | `critical` | never — the prompt is always yours |
+
+For low- and medium-risk actions, authorization may be **implied by reasonable progress toward your overall task**. You need not name the command, tool, or every intermediate step; the action need not be strictly necessary or the only way to achieve the goal. Relevant documentation lookups, bug reproduction, and checking or formatting task-related changes can qualify. This guidance is shared by all classifier models and reinforced in Jev's authorization and decision questions. The inference must come from your stated goal, and explicit limits and stricter policy rules take precedence.
 
 Authorization follows the requested outcome, not exact command wording. "Open a draft PR with these changes" clearly authorizes the conventional preparation needed to deliver it: inspecting the diff, creating a feature branch, staging relevant files, making a normal commit if needed, non-force pushing that feature branch to the intended repository remote, and creating the draft PR. Local staging and commits are `medium`; pushing the branch and creating the PR are `high`, with `clear` authorization from the requested outcome. This grant does not extend to unrelated changes, merging, default/protected-branch pushes, history rewrites, force-pushes, deployments, or releases. Explicit limits such as "do not commit" or "do not push" take precedence. Asking only for code inspection, review, or edits does not by itself authorize commits or remote publication; critical effects and explicit permission carve-outs still surface.
 
@@ -93,7 +95,7 @@ Routine development tooling is judged the same way. A familiar tool used for ord
 
 ### Development environments and local databases
 
-The policy explicitly defaults to allowing ordinary, bounded steps needed to implement, debug, or test the project: typically `medium` risk with `implied` authorization. This covers the development environment, including project-managed containers and local services, not just source files. Execution, authentication, a network connection, or a state change alone is not a reason to escalate. The examples are illustrative, not an exhaustive allowlist; a stricter concrete effect or an explicit user limit takes precedence.
+The policy explicitly defaults to allowing ordinary, bounded steps that reasonably advance implementing, debugging, or testing the project: typically `medium` risk with `implied` authorization. This covers the development environment, including project-managed containers and local services, not just source files. Execution, authentication, a network connection, or a state change alone is not a reason to escalate. The examples are illustrative, not an exhaustive allowlist; a stricter concrete effect or an explicit user limit takes precedence.
 
 Local development database work follows this default: schema inspection, development-data queries, bounded fixture inserts/updates/deletes, and ordinary schema migrations are `medium` when connected to the coding task. The user need not separately request each database operation. Resetting or reseeding an isolated, clearly disposable test database is also `medium`. Drops, truncations, bulk deletions, destructive migrations, or volume removal against data not established as disposable are `critical`, even on localhost. Production/shared mutations are at least `high`; secret extraction, access to real private user/customer data, and security changes are `critical`. Visible evidence of a production tunnel, shared infrastructure, or real private data overrides a local address or a name containing `dev`; the classifier should not invent such evidence in an otherwise ordinary local development workflow.
 
@@ -269,7 +271,7 @@ classifier policy in `policy`, alongside the bounded request context in
 `request`. Each question uses short instructions referring to that shared
 policy and explicitly treats request content as data, not policy instructions.
 This avoids sending the same policy three times: the synthetic `git status`
-fixture's JSON body falls from 45,551 to 16,892 characters (about 63% smaller). These are payload
+fixture's JSON body is 17,773 characters versus the original 45,551 (about 61% smaller). These are payload
 sizes, not measured Jev token counts. TypeSafe documents that
 [batched questions pay for shared state once](https://docs.typesafe.ai/cookbooks/parallel_questions);
 [pricing is input-token-only](https://docs.typesafe.ai/models), with output free.
@@ -299,12 +301,12 @@ the original classification deadline and stop when you answer the prompt. A
 second failure leaves the prompt for you. Other HTTP errors, transport failures,
 and invalid responses are not retried.
 
-A live smoke call on 2026-10-05 (UTC) sent the current shared-policy payload
+A live smoke call on 2026-10-07 (UTC) sent the current shared-policy payload
 through the production adapter with a synthetic `git status` permission request
 and returned HTTP 200 from `jev-1.13.0` on its first attempt. It selected low
 risk, clear authorization, and approve; its probabilities passed the
 normalization and highest-probability checks without adjustment. The service
-reported 3,477 input tokens and 109 output tokens for this call. The request
+reported 3,647 input tokens and 109 output tokens for this call. The request
 inputs, exact wire-body SHA-256 fingerprint, HTTP status, and returned answer
 fields are recorded in
 [`test/fixtures/jev-live-smoke.json`](test/fixtures/jev-live-smoke.json)
