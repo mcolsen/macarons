@@ -303,7 +303,7 @@ jobs:
 
       - name: Upload E2E diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # Per-shard name: upload-artifact@v4 errors on duplicate names.
           name: opencode-e2e-server-artifacts-${{ matrix.suite }}
@@ -360,7 +360,7 @@ jobs:
 
       - name: Upload shutdown diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: opencode-e2e-background-shutdown-artifacts
           path: artifacts/e2e
@@ -405,7 +405,7 @@ jobs:
 
       - name: Upload standalone TUI diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: opencode-e2e-tui-standalone-artifacts
           path: artifacts/e2e
@@ -453,7 +453,7 @@ jobs:
 
       - name: Upload gating TUI diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: opencode-e2e-tui-gating-artifacts
           path: artifacts/e2e
@@ -499,7 +499,7 @@ jobs:
 
       - name: Upload TUI diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: opencode-e2e-tui-artifacts
           path: artifacts/e2e
