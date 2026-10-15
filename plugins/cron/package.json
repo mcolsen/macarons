@@ -1,7 +1,7 @@
 {
   "name": "@macarons/cron",
-  "version": "0.1.0",
-  "description": "OpenCode plugin that adds Claude Code-style cron tools: the agent schedules prompts (one-shot or recurring) that fire back into the session while it is idle",
+  "version": "0.2.0",
+  "description": "OpenCode v2 one-shot and recurring reminders delivered through the native session queue",
   "type": "module",
   "main": "./src/index.ts",
   "exports": {
@@ -10,21 +10,23 @@
   },
   "files": [
     "LICENSE",
-    "src"
+    "src",
+    "index.ts"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --target=bun --outfile=dist/cron.js",
+    "build": "bun build src/index.ts --target=bun --external @opencode/plugin --external effect --outfile=dist/cron.js",
     "lint": "biome check src test",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "engines": {
-    "opencode": ">=1.17.14 <2.0.0"
+    "opencode": ">=2.0.29 <3.0.0"
   },
   "dependencies": {
-    "@macarons/permission-rules": "workspace:*",
-    "@opencode-ai/plugin": "1.18.14",
-    "croner": "^10.0.1"
+    "croner": "^10.0.1",
+    "@opencode/plugin": "2.0.29",
+    "effect": "4.0.1",
+    "@macarons/permission-rules": "workspace:*"
   },
   "keywords": [
     "opencode",
@@ -35,10 +37,9 @@
   "license": "MIT",
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
-    "@macarons/plugin-test-harness": "workspace:*",
-    "@opencode-ai/sdk": "1.18.14",
     "@types/bun": "^1.4.2",
     "@types/node": "^26.6.2",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "@opencode/client": "2.0.29"
   }
 }

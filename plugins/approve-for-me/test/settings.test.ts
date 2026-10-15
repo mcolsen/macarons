@@ -59,21 +59,17 @@ import {
  * a distinguishable state (undefined), and the merge order — global config
  * file under project file, mirroring OpenCode's own precedence — is pinned.
  */
-
 let root: string
 const instanceID = "11111111-1111-4111-8111-111111111111"
 const peerID = "22222222-2222-4222-8222-222222222222"
-
 beforeEach(async () => {
   root = await fs.realpath(
     await fs.mkdtemp(path.join(os.tmpdir(), "auto-approve-settings-")),
   )
 })
-
 afterEach(async () => {
   await fs.rm(root, { recursive: true, force: true })
 })
-
 describe("parseSettings", () => {
   test("accepts a full, valid settings object", () => {
     expect(
@@ -81,12 +77,12 @@ describe("parseSettings", () => {
         enabled: false,
         model: "anthropic/claude-sonnet-5",
         variant: "high",
-        timeoutMs: 10_000,
+        timeoutMs: 10000,
         processing: "serial",
         maxConcurrent: 8,
         notify: false,
         journal: false,
-        unattendedDenyMs: 300_000,
+        unattendedDenyMs: 300000,
         permissions: { edit: false },
         scope: "worktree",
       }),
@@ -94,27 +90,24 @@ describe("parseSettings", () => {
       enabled: false,
       model: "anthropic/claude-sonnet-5",
       variant: "high",
-      timeoutMs: 10_000,
+      timeoutMs: 10000,
       processing: "serial",
       maxConcurrent: 8,
       notify: false,
       journal: false,
-      unattendedDenyMs: 300_000,
+      unattendedDenyMs: 300000,
       permissions: { edit: false },
       scope: "worktree",
     })
   })
-
   test("an empty object is valid and empty", () => {
     expect(parseSettings({})).toEqual({})
   })
-
   test("unknown fields like $schema are ignored", () => {
     expect(
       parseSettings({ $schema: "https://example.com", enabled: true }),
     ).toEqual({ enabled: true })
   })
-
   test("only own settings fields are parsed", () => {
     const inherited = Object.create({ enabled: "not a boolean" }) as Record<
       string,
@@ -122,7 +115,6 @@ describe("parseSettings", () => {
     >
     expect(parseSettings(inherited)).toEqual({})
   })
-
   test("permission opt-outs preserve arbitrary literal keys", () => {
     const input = JSON.parse(
       '{"permissions":{"__proto__":false,"constructor":false,"toString":false}}',
@@ -136,7 +128,6 @@ describe("parseSettings", () => {
       expect(settings.permissions[key]).toBe(false)
     }
   })
-
   test('"model": null keeps the key so a project file can override a global pin', () => {
     const parsed = parseSettings({ model: null })
     expect(parsed).toBeDefined()
@@ -144,7 +135,6 @@ describe("parseSettings", () => {
     expect("model" in parsed).toBe(true)
     expect(parsed.model).toBeUndefined()
   })
-
   for (const cleared of [null, "default"]) {
     test(`"variant": ${JSON.stringify(cleared)} keeps the key and means the model's default effort`, () => {
       const parsed = parseSettings({ variant: cleared })
@@ -154,7 +144,6 @@ describe("parseSettings", () => {
       expect(parsed.variant).toBeUndefined()
     })
   }
-
   test('"unattendedDenyMs": null keeps the key so a project file can override a global value', () => {
     const parsed = parseSettings({ unattendedDenyMs: null })
     expect(parsed).toBeDefined()
@@ -162,7 +151,6 @@ describe("parseSettings", () => {
     expect("unattendedDenyMs" in parsed).toBe(true)
     expect(parsed.unattendedDenyMs).toBeUndefined()
   })
-
   test('"timeoutMs": null keeps the key so a project file can override a global value', () => {
     const parsed = parseSettings({ timeoutMs: null })
     expect(parsed).toBeDefined()
@@ -170,7 +158,6 @@ describe("parseSettings", () => {
     expect("timeoutMs" in parsed).toBe(true)
     expect(parsed.timeoutMs).toBeUndefined()
   })
-
   const invalid: [string, unknown][] = [
     ["a non-object", "enabled"],
     ["an array", []],
@@ -205,12 +192,10 @@ describe("parseSettings", () => {
     })
   }
 })
-
 describe("readSettingsFile", () => {
   test("a missing file is empty settings, not an error", async () => {
     expect(await readSettingsFile(path.join(root, "nope.json"))).toEqual({})
   })
-
   test("round-trips arbitrary literal permission opt-outs", async () => {
     const file = path.join(root, "literal-permissions.json")
     await fs.writeFile(
@@ -224,33 +209,28 @@ describe("readSettingsFile", () => {
       expect(settings?.permissions?.[key]).toBe(false)
     }
   })
-
   test("a non-ENOENT read failure is undefined — callers must pause auto-approval", async () => {
     const file = path.join(root, "settings.json")
     await fs.mkdir(file)
     expect(await readSettingsFile(file)).toBeUndefined()
   })
-
   test("corrupt JSON is undefined — callers must pause auto-approval", async () => {
     const file = path.join(root, "settings.json")
     await fs.writeFile(file, "{not json")
     expect(await readSettingsFile(file)).toBeUndefined()
   })
-
   test("mistyped fields make the whole file undefined", async () => {
     const file = path.join(root, "settings.json")
     await fs.writeFile(file, JSON.stringify({ enabled: "yes" }))
     expect(await readSettingsFile(file)).toBeUndefined()
   })
 })
-
 describe("trusted project settings path", () => {
   test("uses a stable readable project key under the OpenCode config directory", () => {
     const config = path.join(root, "config")
     const first = projectSettingsFile(config, "/projects/a/../b")
     const equivalent = projectSettingsFile(config, "/projects/b")
     const other = projectSettingsFile(config, "/projects/c")
-
     expect(first).toBe(equivalent)
     expect(first).not.toBe(other)
     expect(path.dirname(first)).toBe(
@@ -258,7 +238,6 @@ describe("trusted project settings path", () => {
     )
     expect(path.basename(first)).toMatch(/^b-[a-f0-9]{16}\.json$/)
   })
-
   test("rejects config/state paths inside the project, including symlinks", async () => {
     const project = path.join(root, "project")
     const config = path.join(root, "config")
@@ -270,7 +249,6 @@ describe("trusted project settings path", () => {
       fs.mkdir(state),
       fs.mkdir(inside, { recursive: true }),
     ])
-
     expect(
       await resolveTrustedSettingsPaths(
         project,
@@ -300,7 +278,6 @@ describe("trusted project settings path", () => {
       ),
     ).toBeUndefined()
   })
-
   test("rejects a descendant symlink that redirects a derived settings path into the project", async () => {
     const project = path.join(root, "project")
     const config = path.join(root, "config")
@@ -312,7 +289,6 @@ describe("trusted project settings path", () => {
       fs.mkdir(inside, { recursive: true }),
     ])
     await fs.symlink(inside, path.join(config, "permissions-approve-for-me"))
-
     expect(
       await resolveTrustedSettingsPaths(
         project,
@@ -323,7 +299,6 @@ describe("trusted project settings path", () => {
       ),
     ).toBeUndefined()
   })
-
   test("rejects a session-model directory symlink redirected into the project", async () => {
     const project = path.join(root, "project")
     const config = path.join(root, "config")
@@ -337,7 +312,6 @@ describe("trusted project settings path", () => {
       }),
     ])
     await fs.symlink(inside, sessionModelDirectory(state))
-
     expect(
       await resolveTrustedSettingsPaths(
         project,
@@ -348,7 +322,6 @@ describe("trusted project settings path", () => {
       ),
     ).toBeUndefined()
   })
-
   test("rejects an individual session-model file symlink redirected into the project", async () => {
     const project = path.join(root, "project")
     const config = path.join(root, "config")
@@ -370,12 +343,10 @@ describe("trusted project settings path", () => {
         rootSessionID,
       ),
     ).toBe(lexical)
-
     const planted = path.join(project, "session-model.json")
     await fs.mkdir(trusted!.sessionModelsDir, { recursive: true })
     await fs.writeFile(planted, "{}")
     await fs.symlink(planted, lexical)
-
     expect(
       await resolveTrustedSessionModelFile(
         trusted!.sessionModelsDir,
@@ -383,7 +354,6 @@ describe("trusted project settings path", () => {
       ),
     ).toBeUndefined()
   })
-
   test("a planted pre-slug file behind a rejected symlink is never moved or copied", async () => {
     // The finding-4 no-mutation invariant: rejecting the paths is not enough —
     // the adoption pass must not have moved a legacy settings file through the
@@ -400,7 +370,6 @@ describe("trusted project settings path", () => {
     await fs.symlink(inside, path.join(config, "permissions-approve-for-me"))
     const legacy = preSlugProjectSettingsFile(config, project)
     await fs.writeFile(legacy, `{"enabled":false}\n`)
-
     expect(
       await resolveTrustedSettingsPaths(
         project,
@@ -410,13 +379,11 @@ describe("trusted project settings path", () => {
         instanceID,
       ),
     ).toBeUndefined()
-
     expect(await fs.readFile(legacy, "utf8")).toBe(`{"enabled":false}\n`)
     expect(await fs.readdir(path.join(inside, "projects"))).toEqual([
       path.basename(legacy),
     ])
   })
-
   test("rejects descendant symlinks that escape the canonical config or state root", async () => {
     const project = path.join(root, "project")
     const config = path.join(root, "config")
@@ -428,7 +395,6 @@ describe("trusted project settings path", () => {
         fs.mkdir(directory),
       ),
     )
-
     await fs.symlink(
       escapedConfig,
       path.join(config, "permissions-approve-for-me"),
@@ -442,7 +408,6 @@ describe("trusted project settings path", () => {
         instanceID,
       ),
     ).toBeUndefined()
-
     await fs.rm(path.join(config, "permissions-approve-for-me"))
     await fs.symlink(
       escapedState,
@@ -458,7 +423,6 @@ describe("trusted project settings path", () => {
       ),
     ).toBeUndefined()
   })
-
   test("rejects a dangling descendant symlink before its project target appears", async () => {
     const project = path.join(root, "project")
     const config = path.join(root, "config")
@@ -469,7 +433,6 @@ describe("trusted project settings path", () => {
       futureInside,
       path.join(config, "permissions-approve-for-me"),
     )
-
     expect(
       await resolveTrustedSettingsPaths(
         project,
@@ -480,7 +443,6 @@ describe("trusted project settings path", () => {
       ),
     ).toBeUndefined()
   })
-
   test("canonical project aliases select the same trusted files", async () => {
     const project = path.join(root, "project")
     const alias = path.join(root, "project-link")
@@ -488,7 +450,6 @@ describe("trusted project settings path", () => {
     const state = path.join(root, "state")
     await Promise.all([fs.mkdir(project), fs.mkdir(config), fs.mkdir(state)])
     await fs.symlink(project, alias)
-
     const direct = await resolveTrustedSettingsPaths(
       project,
       config,
@@ -520,17 +481,15 @@ describe("trusted project settings path", () => {
     })
   })
 })
-
 describe("mergeSettings (global under project, like OpenCode config)", () => {
   test("project fields override global fields, absent fields fall through", () => {
     expect(
       mergeSettings(
-        { enabled: true, model: "a/b", timeoutMs: 30_000 },
+        { enabled: true, model: "a/b", timeoutMs: 30000 },
         { enabled: false },
       ),
-    ).toEqual({ enabled: false, model: "a/b", timeoutMs: 30_000 })
+    ).toEqual({ enabled: false, model: "a/b", timeoutMs: 30000 })
   })
-
   test("the permissions map merges per key", () => {
     expect(
       mergeSettings(
@@ -539,20 +498,17 @@ describe("mergeSettings (global under project, like OpenCode config)", () => {
       ),
     ).toEqual({ permissions: { edit: false, bash: false, webfetch: false } })
   })
-
   test('a project "model": null overrides a global pin back to the session model', () => {
     const project = parseSettings({ model: null })
     if (!project) throw new Error("unreachable")
     expect(mergeSettings({ model: "a/b" }, project).model).toBeUndefined()
   })
-
   test('a project "variant": null overrides a global pin back to the model default', () => {
     const project = parseSettings({ variant: null })
     if (!project) throw new Error("unreachable")
     expect(mergeSettings({ variant: "high" }, project).variant).toBeUndefined()
     expect(mergeSettings({ variant: "high" }, {}).variant).toBe("high")
   })
-
   test('a project "unattendedDenyMs": null overrides a global value back to the default', () => {
     const project = parseSettings({ unattendedDenyMs: null })
     if (!project) throw new Error("unreachable")
@@ -561,17 +517,15 @@ describe("mergeSettings (global under project, like OpenCode config)", () => {
     ).toBeUndefined()
     expect(mergeSettings({ unattendedDenyMs: 0 }, {}).unattendedDenyMs).toBe(0)
   })
-
   test('a project "timeoutMs": null overrides a global value back to the default', () => {
     const project = parseSettings({ timeoutMs: null })
     if (!project) throw new Error("unreachable")
     expect(
-      mergeSettings({ timeoutMs: 45_000 }, project).timeoutMs,
+      mergeSettings({ timeoutMs: 45000 }, project).timeoutMs,
     ).toBeUndefined()
-    expect(mergeSettings({ timeoutMs: 45_000 }, {}).timeoutMs).toBe(45_000)
+    expect(mergeSettings({ timeoutMs: 45000 }, {}).timeoutMs).toBe(45000)
   })
 })
-
 describe("resolveSettings", () => {
   test("defaults: enabled, notify, journal, sweep, parallel processing, session model, default effort, default timeout", () => {
     expect(resolveSettings({})).toEqual({
@@ -594,19 +548,17 @@ describe("resolveSettings", () => {
     expect(resolveSettings({ processing: "serial" }).processing).toBe("serial")
     expect(resolveSettings({ scope: "worktree" }).scope).toBe("worktree")
   })
-
   test("clamps the timeout into the supported band", () => {
     // The band is user-facing contract (README documents it): a 2-minute
     // default sized for local and budget cloud judges, 10-minute ceiling.
-    expect(DEFAULT_TIMEOUT_MS).toBe(120_000)
-    expect(MAX_TIMEOUT_MS).toBe(600_000)
+    expect(DEFAULT_TIMEOUT_MS).toBe(120000)
+    expect(MAX_TIMEOUT_MS).toBe(600000)
     expect(resolveSettings({ timeoutMs: 1 }).timeoutMs).toBe(MIN_TIMEOUT_MS)
     expect(resolveSettings({ timeoutMs: 10 ** 9 }).timeoutMs).toBe(
       MAX_TIMEOUT_MS,
     )
-    expect(resolveSettings({ timeoutMs: 42_000 }).timeoutMs).toBe(42_000)
+    expect(resolveSettings({ timeoutMs: 42000 }).timeoutMs).toBe(42000)
   })
-
   test("unattendedDenyMs: ≤ 0 is off, positive values clamp — never deny faster than the floor", () => {
     expect(resolveSettings({ unattendedDenyMs: 0 }).unattendedDenyMs).toBe(0)
     expect(resolveSettings({ unattendedDenyMs: -1 }).unattendedDenyMs).toBe(0)
@@ -616,11 +568,10 @@ describe("resolveSettings", () => {
     expect(
       resolveSettings({ unattendedDenyMs: 10 ** 12 }).unattendedDenyMs,
     ).toBe(MAX_UNATTENDED_DENY_MS)
-    expect(
-      resolveSettings({ unattendedDenyMs: 300_000 }).unattendedDenyMs,
-    ).toBe(300_000)
+    expect(resolveSettings({ unattendedDenyMs: 300000 }).unattendedDenyMs).toBe(
+      300000,
+    )
   })
-
   test("clamps maxConcurrent into the supported band, whole slots only", () => {
     expect(resolveSettings({ maxConcurrent: 0 }).maxConcurrent).toBe(
       MIN_MAX_CONCURRENT,
@@ -628,14 +579,13 @@ describe("resolveSettings", () => {
     expect(resolveSettings({ maxConcurrent: -3 }).maxConcurrent).toBe(
       MIN_MAX_CONCURRENT,
     )
-    expect(resolveSettings({ maxConcurrent: 1_000 }).maxConcurrent).toBe(
+    expect(resolveSettings({ maxConcurrent: 1000 }).maxConcurrent).toBe(
       MAX_MAX_CONCURRENT,
     )
     expect(resolveSettings({ maxConcurrent: 2.9 }).maxConcurrent).toBe(2)
     expect(resolveSettings({ maxConcurrent: 8 }).maxConcurrent).toBe(8)
   })
 })
-
 describe("parseModelRef", () => {
   test("splits on the first slash — model ids may contain slashes", () => {
     expect(parseModelRef("openrouter/anthropic/claude-sonnet-5")).toEqual({
@@ -643,11 +593,9 @@ describe("parseModelRef", () => {
       modelID: "anthropic/claude-sonnet-5",
     })
   })
-
   test("round-trips through formatModelRef", () => {
     expect(formatModelRef({ providerID: "a", modelID: "b/c" })).toBe("a/b/c")
   })
-
   for (const bad of [
     "",
     "noslash",
@@ -662,7 +610,6 @@ describe("parseModelRef", () => {
     })
   }
 })
-
 // What the TUI writes with, so it is pinned against what this plugin READS
 // with. The patch semantics themselves — merge, delete, preserve unknown
 // keys, refuse a corrupt file — belong to the library now and are pinned in
@@ -678,7 +625,6 @@ describe("settings written by patchSettingsFile", () => {
       model: "a/b",
     })
   })
-
   test("arbitrary literal permission opt-outs survive save and parse", async () => {
     const file = path.join(root, "literal-settings.json")
     const permissions = Object.fromEntries(
@@ -691,7 +637,6 @@ describe("settings written by patchSettingsFile", () => {
       expect(settings?.permissions?.[key]).toBe(false)
     }
   })
-
   test("a null model written by the picker survives as a key and clears the pin", async () => {
     // The key has to stay in the file — that is how a project file overrides a
     // global pin — while reading back as "follow the session model".
@@ -705,7 +650,6 @@ describe("settings written by patchSettingsFile", () => {
     expect(settings?.enabled).toBe(true)
     expect(settings?.model).toBeUndefined()
   })
-
   test("a corrupt file is refused rather than flattened", async () => {
     const file = path.join(root, "settings.json")
     await fs.writeFile(file, "{not json")
@@ -713,7 +657,6 @@ describe("settings written by patchSettingsFile", () => {
     expect(await fs.readFile(file, "utf8")).toBe("{not json")
   })
 })
-
 describe("instance override file", () => {
   test("keyed by project root and factory UUID", () => {
     const state = path.join(root, "state")
@@ -732,17 +675,14 @@ describe("instance override file", () => {
       overrideFile(state, "/project/a", peerID),
     )
   })
-
   test("absent file means no override", async () => {
     expect(await readOverride(path.join(root, "nope.json"))).toBeUndefined()
   })
-
   test("an unreadable override pauses approval instead of looking absent", async () => {
     const file = path.join(root, "override.json")
     await fs.mkdir(file)
     expect(await readOverride(file)).toEqual({ enabled: false })
   })
-
   test("round-trips a toggle, and clear removes it", async () => {
     const file = overrideFile(path.join(root, "state"), root, instanceID)
     await writeOverride(file, { enabled: false })
@@ -751,11 +691,10 @@ describe("instance override file", () => {
     expect(await readOverride(file)).toBeUndefined()
     await clearOverride(file) // idempotent
   })
-
   test("the toggle timestamp round-trips; junk stamps are dropped, not trusted", async () => {
     const file = overrideFile(path.join(root, "state"), root, instanceID)
-    await writeOverride(file, { enabled: true, at: 1_234 })
-    expect(await readOverride(file)).toEqual({ enabled: true, at: 1_234 })
+    await writeOverride(file, { enabled: true, at: 1234 })
+    expect(await readOverride(file)).toEqual({ enabled: true, at: 1234 })
     // Older TUI halves write no stamp; wrong-typed or non-finite stamps read
     // as absent (the timer then simply cannot disarm retroactively).
     await fs.writeFile(file, JSON.stringify({ enabled: true, at: "later" }))
@@ -763,7 +702,6 @@ describe("instance override file", () => {
     await fs.writeFile(file, JSON.stringify({ enabled: true, at: null }))
     expect(await readOverride(file)).toEqual({ enabled: true })
   })
-
   test("a corrupt override pauses approval instead of falling through to on", async () => {
     const file = path.join(root, "override.json")
     await fs.writeFile(file, "{not json")
@@ -772,7 +710,6 @@ describe("instance override file", () => {
     expect(await readOverride(file)).toEqual({ enabled: false })
   })
 })
-
 describe("owned override channel", () => {
   test("leaves both unowned generations untouched rather than inheriting or dual-writing them", async () => {
     const state = path.join(root, "state")
@@ -790,7 +727,6 @@ describe("owned override channel", () => {
     for (const file of oldFiles)
       expect(await fs.readFile(file, "utf8")).toBe(bytes)
   })
-
   test("rejects missing, malformed, and path-like owner IDs", async () => {
     for (const invalid of [
       undefined,
@@ -814,14 +750,12 @@ describe("owned override channel", () => {
     }
   })
 })
-
 describe("opencode.json[c] as the settings source", () => {
   const NAME = "@macarons/approve-for-me"
   const packageRoot = path.resolve(import.meta.dir, "..")
   const configD = () => path.join(root, "xdg-config")
   const stateD = () => path.join(root, "xdg-state")
   const project = () => path.join(root, "project")
-
   beforeEach(async () => {
     await Promise.all([
       fs.mkdir(configD(), { recursive: true }),
@@ -829,12 +763,10 @@ describe("opencode.json[c] as the settings source", () => {
       fs.mkdir(project(), { recursive: true }),
     ])
   })
-
   async function write(file: string, text: string) {
     await fs.mkdir(path.dirname(file), { recursive: true })
     await fs.writeFile(file, text)
   }
-
   const snapshotInput = () => ({
     configDir: configD(),
     projectSettingsFile: projectSettingsFile(configD(), project()),
@@ -845,7 +777,6 @@ describe("opencode.json[c] as the settings source", () => {
     configRoot: project(),
     packageDir: undefined,
   })
-
   test("worktreeConfigCandidates walks the directory chain in host merge order", () => {
     const dir = path.join(project(), "packages", "app")
     expect(worktreeConfigCandidates(dir, project())).toEqual([
@@ -855,15 +786,14 @@ describe("opencode.json[c] as the settings source", () => {
       path.join(project(), "packages", "opencode.jsonc"),
       path.join(dir, "opencode.json"),
       path.join(dir, "opencode.jsonc"),
-      path.join(dir, ".opencode", "opencode.json"),
-      path.join(dir, ".opencode", "opencode.jsonc"),
-      path.join(project(), "packages", ".opencode", "opencode.json"),
-      path.join(project(), "packages", ".opencode", "opencode.jsonc"),
       path.join(project(), ".opencode", "opencode.json"),
       path.join(project(), ".opencode", "opencode.jsonc"),
+      path.join(project(), "packages", ".opencode", "opencode.json"),
+      path.join(project(), "packages", ".opencode", "opencode.jsonc"),
+      path.join(dir, ".opencode", "opencode.json"),
+      path.join(dir, ".opencode", "opencode.jsonc"),
     ])
   })
-
   test("a directory outside the root collapses to the root alone", () => {
     expect(
       worktreeConfigCandidates(path.join(root, "elsewhere"), project()),
@@ -874,14 +804,12 @@ describe("opencode.json[c] as the settings source", () => {
       path.join(project(), ".opencode", "opencode.jsonc"),
     ])
   })
-
   test('hostConfigRoot keeps the host\'s "/" stop for non-git sessions', () => {
     expect(hostConfigRoot("/repo/worktree")).toBe("/repo/worktree")
     expect(hostConfigRoot("/")).toBe("/")
     expect(hostConfigRoot(undefined)).toBe("/")
     expect(hostConfigRoot("")).toBe("/")
   })
-
   test('the "/" boundary walks every ancestor, exactly like the host', () => {
     const candidates = worktreeConfigCandidates(project(), "/")
     // Outermost first for the root chain: "/" leads, the launch directory
@@ -892,14 +820,13 @@ describe("opencode.json[c] as the settings source", () => {
     expect(candidates.indexOf(path.join(root, "opencode.json"))).toBeLessThan(
       candidates.indexOf(path.join(project(), "opencode.json")),
     )
-    // The .opencode pairs come nearest-first.
+    // V2 applies parent .opencode directories before their children.
     expect(
       candidates.indexOf(path.join(project(), ".opencode", "opencode.json")),
-    ).toBeLessThan(
+    ).toBeGreaterThan(
       candidates.indexOf(path.join(root, ".opencode", "opencode.json")),
     )
   })
-
   test("a parent directory's config is seen when the boundary extends past the project", async () => {
     // A non-git session: the project root pins state to the launch
     // directory, but the host discovers config in every ancestor — a parent
@@ -907,7 +834,9 @@ describe("opencode.json[c] as the settings source", () => {
     const parentConfig = path.join(root, "opencode.json")
     await write(
       parentConfig,
-      JSON.stringify({ plugin: [[NAME, { enabled: false }]] }),
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { enabled: false } }],
+      }),
     )
     const snapshot = await readPolicySnapshot({
       ...snapshotInput(),
@@ -919,19 +848,22 @@ describe("opencode.json[c] as the settings source", () => {
     })
     await fs.rm(parentConfig)
   })
-
   test("OPENCODE_DISABLE_PROJECT_CONFIG makes the project layers inert, like the host", async () => {
     await write(
       path.join(configD(), "opencode.jsonc"),
-      JSON.stringify({ plugin: [[NAME, { model: "a/b" }]] }),
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { model: "a/b" } }],
+      }),
     )
     const worktree = path.join(project(), "opencode.json")
     await write(
       worktree,
-      JSON.stringify({ plugin: [[NAME, { model: "x/y", enabled: false }]] }),
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { model: "x/y", enabled: false } }],
+      }),
     )
     await write(
-      path.join(project(), ".opencode", "plugin", "extra.ts"),
+      path.join(project(), ".opencode", "plugins", "extra.ts"),
       "export const x = 1\n",
     )
     process.env.OPENCODE_DISABLE_PROJECT_CONFIG = "1"
@@ -951,7 +883,6 @@ describe("opencode.json[c] as the settings source", () => {
       files: [worktree],
     })
   })
-
   test("scanPluginConfigFile parses JSONC, matches name specs with versions, and lists every spec", async () => {
     const file = path.join(configD(), "opencode.jsonc")
     await write(
@@ -959,9 +890,9 @@ describe("opencode.json[c] as the settings source", () => {
       `{
   // a comment
   "theme": "dark",
-  "plugin": [
+  "plugins": [
     "some-other-plugin",
-    ["${NAME}@1.2.3", { "timeoutMs": 45000 }],
+    { "package": "${NAME}@1.2.3", "options": { "timeoutMs": 45000 } },
   ],
 }`,
     )
@@ -969,24 +900,23 @@ describe("opencode.json[c] as the settings source", () => {
     if (scan === "missing" || scan === "unreadable")
       throw new Error(`unexpected ${scan}`)
     expect(scan.hasOwnEntry).toBe(true)
-    expect(scan.ownOptions).toEqual({ timeoutMs: 45_000 })
+    expect(scan.ownOptions).toEqual({ timeoutMs: 45000 })
     expect(scan.pluginSpecs).toEqual(["some-other-plugin", `${NAME}@1.2.3`])
     expect(scan.hash).toBe(sha256Hex(await fs.readFile(file, "utf8")))
   })
-
   test("JSONC plugin options preserve arbitrary literal permission keys", async () => {
     const file = path.join(configD(), "opencode.jsonc")
     await write(
       file,
       `{
   // Permission names are open strings.
-  "plugin": [["${NAME}", {
+  "plugins": [{ "package": "${NAME}", "options": {
     "permissions": {
       "__proto__": false,
       "constructor": false,
       "toString": false,
     },
-  }]],
+  }}],
 }`,
     )
     const global = await readGlobalEntrySettings(
@@ -1002,7 +932,6 @@ describe("opencode.json[c] as the settings source", () => {
       expect(global.settings.permissions[key]).toBe(false)
     }
   })
-
   test("ownPackageDir identifies the existing shipped package root", async () => {
     const manifest = JSON.parse(
       await fs.readFile(path.join(packageRoot, "package.json"), "utf8"),
@@ -1010,7 +939,6 @@ describe("opencode.json[c] as the settings source", () => {
     expect(manifest.name).toBe(NAME)
     expect(await ownPackageDir()).toBe(await fs.realpath(packageRoot))
   })
-
   for (const entry of [".", "src/index.ts"]) {
     test.each(["absolute", "relative", "file-URL"])(
       `%s ${entry} entries retain their options, including enabled:false`,
@@ -1026,10 +954,13 @@ describe("opencode.json[c] as the settings source", () => {
         const options = {
           enabled: false,
           model: "e2e/test",
-          timeoutMs: 45_000,
+          timeoutMs: 45000,
           journal: false,
         }
-        await write(file, JSON.stringify({ plugin: [[spec, options]] }))
+        await write(
+          file,
+          JSON.stringify({ plugins: [{ package: spec, options: options }] }),
+        )
         const packageDir = await ownPackageDir()
         const scan = await scanPluginConfigFile(file, packageDir)
         if (scan === "missing" || scan === "unreadable")
@@ -1042,7 +973,6 @@ describe("opencode.json[c] as the settings source", () => {
       },
     )
   }
-
   test("parent, sibling, and similarly prefixed package paths do not match", async () => {
     const packageDir = path.join(root, "own-package")
     const sibling = path.join(root, "foreign-package")
@@ -1065,7 +995,9 @@ describe("opencode.json[c] as the settings source", () => {
     ]) {
       await write(
         file,
-        JSON.stringify({ plugin: [[spec, { enabled: false }]] }),
+        JSON.stringify({
+          plugins: [{ package: spec, options: { enabled: false } }],
+        }),
       )
       const scan = await scanPluginConfigFile(file, packageDir)
       if (scan === "missing" || scan === "unreadable")
@@ -1076,10 +1008,15 @@ describe("opencode.json[c] as the settings source", () => {
       ).toEqual({ settings: {} })
     }
   })
-
   test("the last own entry wins across name and path specs, including bare entries", async () => {
-    const enabled = [NAME, { enabled: true, model: "e2e/test" }]
-    const disabled = [pathToFileURL(packageRoot).href, { enabled: false }]
+    const enabled = {
+      package: NAME,
+      options: { enabled: true, model: "e2e/test" },
+    }
+    const disabled = {
+      package: pathToFileURL(packageRoot).href,
+      options: { enabled: false },
+    }
     const file = path.join(configD(), "opencode.json")
     const packageDir = await ownPackageDir()
     for (const [plugin, settings] of [
@@ -1087,13 +1024,12 @@ describe("opencode.json[c] as the settings source", () => {
       [[disabled, enabled], { enabled: true, model: "e2e/test" }],
       [[disabled, NAME], {}],
     ] as const) {
-      await write(file, JSON.stringify({ plugin }))
+      await write(file, JSON.stringify({ plugins: plugin }))
       expect(
         await readGlobalEntrySettings(configD(), packageDir, project()),
       ).toEqual({ settings, file })
     }
   })
-
   test("standalone matching caches its own file but re-resolves configured symlinks", async () => {
     const ownFile = await fs.realpath(
       path.join(packageRoot, "src/shared/config-policy.ts"),
@@ -1103,7 +1039,6 @@ describe("opencode.json[c] as the settings source", () => {
     await write(foreignFile, "export default () => ({})\n")
     await fs.symlink(ownFile, link)
     expect(await isOwnPluginSpec(link, configD(), undefined)).toBe(true)
-
     const realpath = spyOn(fs, "realpath")
     try {
       expect(await isOwnPluginSpec(link, configD(), undefined)).toBe(true)
@@ -1120,7 +1055,6 @@ describe("opencode.json[c] as the settings source", () => {
       realpath.mockRestore()
     }
   })
-
   test.each(["node_modules/foreign-plugin", "plugins/foreign-plugin"])(
     "a physically nested package at %s cannot replace this plugin's disabled options",
     async (nested) => {
@@ -1141,9 +1075,9 @@ describe("opencode.json[c] as the settings source", () => {
         await write(
           file,
           JSON.stringify({
-            plugin: [
-              [packageDir, { enabled: false }],
-              [spec, { enabled: true }],
+            plugins: [
+              { package: packageDir, options: { enabled: false } },
+              { package: spec, options: { enabled: true } },
             ],
           }),
         )
@@ -1153,17 +1087,15 @@ describe("opencode.json[c] as the settings source", () => {
       }
     },
   )
-
   test("junk plugin shapes are unreadable, never guessed at", async () => {
     const file = path.join(configD(), "opencode.json")
     for (const plugin of [{}, [5], [["x", {}, 3]], "not-an-array"]) {
-      await write(file, JSON.stringify({ plugin }))
+      await write(file, JSON.stringify({ plugins: plugin }))
       expect(await scanPluginConfigFile(file, undefined)).toBe("unreadable")
     }
     await write(file, "{broken")
     expect(await scanPluginConfigFile(file, undefined)).toBe("unreadable")
   })
-
   test("package names, versions, and npm aliases name only this plugin", async () => {
     const file = path.join(configD(), "opencode.json")
     for (const spec of [
@@ -1185,7 +1117,9 @@ describe("opencode.json[c] as the settings source", () => {
     ]) {
       await write(
         file,
-        JSON.stringify({ plugin: [[spec, { enabled: false }]] }),
+        JSON.stringify({
+          plugins: [{ package: spec, options: { enabled: false } }],
+        }),
       )
       const scan = await scanPluginConfigFile(file, undefined)
       if (scan === "missing" || scan === "unreadable")
@@ -1202,14 +1136,13 @@ describe("opencode.json[c] as the settings source", () => {
       "@mcolsen-opencode/permissions-approve-for-me-other",
       "opencode-permissions-approve-for-me-other",
     ]) {
-      await write(file, JSON.stringify({ plugin: [spec] }))
+      await write(file, JSON.stringify({ plugins: [spec] }))
       const foreign = await scanPluginConfigFile(file, undefined)
       if (foreign === "missing" || foreign === "unreadable")
         throw new Error(`unexpected ${foreign} for ${spec}`)
       expect(foreign.hasOwnEntry).toBe(false)
     }
   })
-
   test("a legacy package entry still preserves disabled policy and opt-outs", async () => {
     const file = path.join(configD(), "opencode.json")
     const settings = {
@@ -1220,13 +1153,15 @@ describe("opencode.json[c] as the settings source", () => {
     await write(
       file,
       JSON.stringify({
-        plugin: [
-          [NAME, { enabled: true }],
-          ["@macarons/permissions-approve-for-me", settings],
+        plugins: [
+          { package: NAME, options: { enabled: true } },
+          {
+            package: "@macarons/permissions-approve-for-me",
+            options: settings,
+          },
         ],
       }),
     )
-
     expect(
       await readGlobalEntrySettings(configD(), undefined, project()),
     ).toEqual({ settings, file })
@@ -1234,7 +1169,6 @@ describe("opencode.json[c] as the settings source", () => {
     expect(snapshot.fault).toBeUndefined()
     expect(snapshot.settings).toEqual(settings)
   })
-
   test('a bare "."-prefixed spec is a path (host isPathPluginSpec), not a package name', async () => {
     const packageDir = await ownPackageDir()
     if (!packageDir) throw new Error("own package dir unresolved")
@@ -1246,16 +1180,17 @@ describe("opencode.json[c] as the settings source", () => {
     await write(
       file,
       JSON.stringify({
-        plugin: [[".pkg", { enabled: false, timeoutMs: 30_000 }]],
+        plugins: [
+          { package: ".pkg", options: { enabled: false, timeoutMs: 30000 } },
+        ],
       }),
     )
     const scan = await scanPluginConfigFile(file, packageDir)
     if (scan === "missing" || scan === "unreadable")
       throw new Error(`unexpected ${scan}`)
     expect(scan.hasOwnEntry).toBe(true)
-    expect(scan.ownOptions).toEqual({ enabled: false, timeoutMs: 30_000 })
+    expect(scan.ownOptions).toEqual({ enabled: false, timeoutMs: 30000 })
   })
-
   test("{env:} substitution is mirrored; a substituted spec still names this plugin", async () => {
     const file = path.join(configD(), "opencode.json")
     process.env.AFM_TEST_SPEC = NAME
@@ -1263,7 +1198,9 @@ describe("opencode.json[c] as the settings source", () => {
       await write(
         file,
         JSON.stringify({
-          plugin: [["{env:AFM_TEST_SPEC}", { notify: false }]],
+          plugins: [
+            { package: "{env:AFM_TEST_SPEC}", options: { notify: false } },
+          ],
         }),
       )
       const scan = await scanPluginConfigFile(file, undefined)
@@ -1280,16 +1217,15 @@ describe("opencode.json[c] as the settings source", () => {
       throw new Error(`unexpected ${unset}`)
     expect(unset.hasOwnEntry).toBe(false)
   })
-
   test("a live {file:} substitution fails closed; a commented one is inert", async () => {
     const file = path.join(configD(), "opencode.jsonc")
-    await write(file, JSON.stringify({ plugin: ["{file:./spec.txt}"] }))
+    await write(file, JSON.stringify({ plugins: ["{file:./spec.txt}"] }))
     expect(await scanPluginConfigFile(file, undefined)).toBe("unreadable")
     await write(
       file,
       `{
   // {file:./spec.txt} would substitute here if uncommented
-  "plugin": []
+  "plugins": []
 }`,
     )
     const scan = await scanPluginConfigFile(file, undefined)
@@ -1298,61 +1234,49 @@ describe("opencode.json[c] as the settings source", () => {
     expect(scan.definesPlugin).toBe(true)
     expect(scan.pluginSpecs).toEqual([])
   })
-
   test("the later global candidate's entry replaces the earlier one wholly", async () => {
     await write(
-      path.join(configD(), "config.json"),
-      JSON.stringify({ plugin: [[NAME, { model: "a/b", journal: false }]] }),
+      path.join(configD(), "opencode.json"),
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { model: "a/b", journal: false } }],
+      }),
     )
     await write(
       path.join(configD(), "opencode.jsonc"),
-      JSON.stringify({ plugin: [[NAME, { timeoutMs: 45_000 }]] }),
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { timeoutMs: 45000 } }],
+      }),
     )
     const global = await readGlobalEntrySettings(
       configD(),
       undefined,
       project(),
     )
-    expect(global?.settings).toEqual({ timeoutMs: 45_000 })
+    expect(global?.settings).toEqual({ timeoutMs: 45000 })
     expect(global?.file).toBe(path.join(configD(), "opencode.jsonc"))
   })
-
-  test("a later plugin array without this plugin shadows an earlier entry wholly", async () => {
+  test("V2 accumulates plugin arrays; unrelated or empty later arrays preserve the earlier own entry", async () => {
+    const earlier = path.join(configD(), "opencode.json")
+    const later = path.join(configD(), "opencode.jsonc")
     await write(
-      path.join(configD(), "config.json"),
-      JSON.stringify({ plugin: [[NAME, { enabled: false, model: "a/b" }]] }),
+      earlier,
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { enabled: false, model: "a/b" } }],
+      }),
     )
-    // The host's global merge REPLACES the whole array: only
-    // "some-other-plugin" survives, so the config.json options are dead and
-    // must not be honored as policy.
-    await write(
-      path.join(configD(), "opencode.json"),
-      JSON.stringify({ plugin: ["some-other-plugin"] }),
-    )
-    const shadowedByForeign = await readGlobalEntrySettings(
-      configD(),
-      undefined,
-      project(),
-    )
-    expect(shadowedByForeign?.settings).toEqual({})
-    expect(shadowedByForeign?.file).toBeUndefined()
-
-    await write(
-      path.join(configD(), "opencode.jsonc"),
-      JSON.stringify({ plugin: [] }),
-    )
-    const shadowedByEmpty = await readGlobalEntrySettings(
-      configD(),
-      undefined,
-      project(),
-    )
-    expect(shadowedByEmpty?.settings).toEqual({})
+    for (const plugins of [["some-other-plugin"], []]) {
+      await write(later, JSON.stringify({ plugins }))
+      expect(
+        await readGlobalEntrySettings(configD(), undefined, project()),
+      ).toEqual({ settings: { enabled: false, model: "a/b" }, file: earlier })
+    }
   })
-
   test("a later file WITHOUT a plugin key does not shadow the earlier entry", async () => {
     await write(
-      path.join(configD(), "config.json"),
-      JSON.stringify({ plugin: [[NAME, { journal: false }]] }),
+      path.join(configD(), "opencode.json"),
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { journal: false } }],
+      }),
     )
     await write(
       path.join(configD(), "opencode.jsonc"),
@@ -1364,12 +1288,16 @@ describe("opencode.json[c] as the settings source", () => {
       project(),
     )
     expect(global?.settings).toEqual({ journal: false })
-    expect(global?.file).toBe(path.join(configD(), "config.json"))
+    expect(global?.file).toBe(path.join(configD(), "opencode.json"))
   })
-
   test("a global candidate symlinked into the project fails closed on read and save", async () => {
     const target = path.join(project(), "opencode.jsonc")
-    await write(target, JSON.stringify({ plugin: [[NAME, { enabled: true }]] }))
+    await write(
+      target,
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { enabled: true } }],
+      }),
+    )
     await fs.symlink(target, path.join(configD(), "opencode.jsonc"))
     expect(
       await readGlobalEntrySettings(configD(), undefined, project()),
@@ -1380,24 +1308,27 @@ describe("opencode.json[c] as the settings source", () => {
       }),
     ).toBe("unsafe")
   })
-
   test("a global candidate symlinked outside the config directory fails closed", async () => {
     const target = path.join(root, "elsewhere.json")
-    await write(target, JSON.stringify({ plugin: [[NAME, {}]] }))
+    await write(
+      target,
+      JSON.stringify({ plugins: [{ package: NAME, options: {} }] }),
+    )
     await fs.symlink(target, path.join(configD(), "opencode.json"))
     expect(
       await readGlobalEntrySettings(configD(), undefined, project()),
     ).toBeUndefined()
   })
-
   test("a candidate symlinked WITHIN the config directory stays trusted", async () => {
     await write(
       path.join(configD(), "opencode.jsonc"),
-      JSON.stringify({ plugin: [[NAME, { notify: false }]] }),
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { notify: false } }],
+      }),
     )
     await fs.symlink(
       path.join(configD(), "opencode.jsonc"),
-      path.join(configD(), "config.json"),
+      path.join(configD(), "opencode.json"),
     )
     const global = await readGlobalEntrySettings(
       configD(),
@@ -1406,7 +1337,6 @@ describe("opencode.json[c] as the settings source", () => {
     )
     expect(global?.settings).toEqual({ notify: false })
   })
-
   test("no global entry means empty settings; unreadable or mistyped fails closed", async () => {
     expect(
       (await readGlobalEntrySettings(configD(), undefined, project()))
@@ -1418,29 +1348,30 @@ describe("opencode.json[c] as the settings source", () => {
     ).toBeUndefined()
     await write(
       path.join(configD(), "opencode.json"),
-      JSON.stringify({ plugin: [[NAME, { timeoutMs: "slow" }]] }),
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { timeoutMs: "slow" } }],
+      }),
     )
     expect(
       await readGlobalEntrySettings(configD(), undefined, project()),
     ).toBeUndefined()
   })
-
   test("worktree config naming this plugin pends until blessed, applies, then pends on drift", async () => {
     const file = path.join(project(), ".opencode", "opencode.json")
     await write(
       file,
-      JSON.stringify({ plugin: [[NAME, { permissions: { bash: false } }]] }),
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { permissions: { bash: false } } }],
+      }),
     )
     const scan = await scanWorktreeConfig(project(), project(), undefined)
     expect(scan.unreadable).toEqual([])
-
     const empty = await readBlessing(blessFile(stateD(), project()))
     if (!empty) throw new Error("blessing unreadable")
     expect(evaluateWorktreePolicy(scan, empty)).toEqual({
       state: "pending",
       pending: [file],
     })
-
     await writeBlessing(blessFile(stateD(), project()), {
       files: { [file]: sha256Hex(await fs.readFile(file, "utf8")) },
     })
@@ -1451,7 +1382,6 @@ describe("opencode.json[c] as the settings source", () => {
       settings: { permissions: { bash: false } },
       blessedFiles: [file],
     })
-
     await fs.appendFile(file, "\n")
     const drifted = await scanWorktreeConfig(project(), project(), undefined)
     expect(evaluateWorktreePolicy(drifted, blessed)).toEqual({
@@ -1459,43 +1389,52 @@ describe("opencode.json[c] as the settings source", () => {
       pending: [file],
     })
   })
-
   test("deleting a blessed policy-supplying file pends instead of widening to defaults", async () => {
-    const file = path.join(project(), ".opencode", "opencode.json")
-    await write(file, JSON.stringify({ plugin: [[NAME, { enabled: false }]] }))
-    const blessing = {
-      files: { [file]: sha256Hex(await fs.readFile(file, "utf8")) },
-      policy: [file],
-    }
-    await fs.rm(file)
-    const scan = await scanWorktreeConfig(project(), project(), undefined)
-    expect(evaluateWorktreePolicy(scan, blessing)).toEqual({
-      state: "pending",
-      pending: [file],
-    })
-  })
-
-  test("removing only the plugin entry from a blessed file pends too", async () => {
     const file = path.join(project(), ".opencode", "opencode.json")
     await write(
       file,
-      JSON.stringify({ plugin: [[NAME, { permissions: { bash: false } }]] }),
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { enabled: false } }],
+      }),
     )
     const blessing = {
       files: { [file]: sha256Hex(await fs.readFile(file, "utf8")) },
       policy: [file],
     }
-    await write(file, JSON.stringify({ plugin: [] }))
+    await fs.rm(file)
     const scan = await scanWorktreeConfig(project(), project(), undefined)
     expect(evaluateWorktreePolicy(scan, blessing)).toEqual({
       state: "pending",
       pending: [file],
     })
   })
-
+  test("removing only the plugin entry from a blessed file pends too", async () => {
+    const file = path.join(project(), ".opencode", "opencode.json")
+    await write(
+      file,
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { permissions: { bash: false } } }],
+      }),
+    )
+    const blessing = {
+      files: { [file]: sha256Hex(await fs.readFile(file, "utf8")) },
+      policy: [file],
+    }
+    await write(file, JSON.stringify({ plugins: [] }))
+    const scan = await scanWorktreeConfig(project(), project(), undefined)
+    expect(evaluateWorktreePolicy(scan, blessing)).toEqual({
+      state: "pending",
+      pending: [file],
+    })
+  })
   test("a pre-policy blessing record holds every blessed config candidate to the same bar", async () => {
     const file = path.join(project(), "opencode.jsonc")
-    await write(file, JSON.stringify({ plugin: [[NAME, { journal: false }]] }))
+    await write(
+      file,
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { journal: false } }],
+      }),
+    )
     const blessing = {
       files: { [file]: sha256Hex(await fs.readFile(file, "utf8")) },
     }
@@ -1506,9 +1445,8 @@ describe("opencode.json[c] as the settings source", () => {
       pending: [file],
     })
   })
-
   test("a removed blessed sideload source does not pend — removal only unloads code", async () => {
-    const source = path.join(project(), ".opencode", "plugin", "extra.ts")
+    const source = path.join(project(), ".opencode", "plugins", "extra.ts")
     const legacy = { files: { [source]: sha256Hex("gone") } }
     const scan = await scanWorktreeConfig(project(), project(), undefined)
     expect(evaluateWorktreePolicy(scan, legacy)).toEqual({
@@ -1523,23 +1461,19 @@ describe("opencode.json[c] as the settings source", () => {
       blessedFiles: [],
     })
   })
-
   test("an unreadable worktree candidate or blessing record fails closed", async () => {
     const file = path.join(project(), "opencode.jsonc")
     await write(file, "{broken")
     const scan = await scanWorktreeConfig(project(), project(), undefined)
     expect(scan.unreadable).toEqual([file])
-
     await write(blessFile(stateD(), project()), "{broken")
     expect(await readBlessing(blessFile(stateD(), project()))).toBeUndefined()
   })
-
   test("unblessedSideloads flags plugin-bearing files and sources the blessing does not cover", async () => {
     const config = path.join(project(), "opencode.json")
-    await write(config, JSON.stringify({ plugin: ["@scope/foreign"] }))
-    const source = path.join(project(), ".opencode", "plugin", "extra.ts")
+    await write(config, JSON.stringify({ plugins: ["@scope/foreign"] }))
+    const source = path.join(project(), ".opencode", "plugins", "extra.ts")
     await write(source, "export const x = 1\n")
-
     const scan = await scanWorktreeConfig(project(), project(), undefined)
     const sources = await scanSideloadSources(project(), project())
     expect(sources).toEqual([
@@ -1557,7 +1491,6 @@ describe("opencode.json[c] as the settings source", () => {
     }
     expect(unblessedSideloads(scan, sources, blessing)).toEqual([])
   })
-
   test("patchGlobalEntryOptions edits atomically while preserving JSONC and mode", async () => {
     const file = path.join(configD(), "opencode.jsonc")
     await write(
@@ -1565,8 +1498,8 @@ describe("opencode.json[c] as the settings source", () => {
       `{
   // keep this comment
   "theme": "dark",
-  "plugin": [
-    ["${NAME}", { "model": "e2e/other", "journal": false }],
+  "plugins": [
+    { "package": "${NAME}", "options": { "model": "e2e/other", "journal": false } },
   ],
 }`,
     )
@@ -1576,7 +1509,7 @@ describe("opencode.json[c] as the settings source", () => {
     try {
       expect(
         await patchGlobalEntryOptions(configD(), undefined, project(), {
-          timeoutMs: 300_000,
+          timeoutMs: 300000,
           journal: undefined,
         }),
       ).toBe("ok")
@@ -1591,12 +1524,14 @@ describe("opencode.json[c] as the settings source", () => {
     const scan = await scanPluginConfigFile(file, undefined)
     if (scan === "missing" || scan === "unreadable")
       throw new Error(`unexpected ${scan}`)
-    expect(scan.ownOptions).toEqual({ model: "e2e/other", timeoutMs: 300_000 })
+    expect(scan.ownOptions).toEqual({ model: "e2e/other", timeoutMs: 300000 })
   })
-
   test("patchGlobalEntryOptions serializes concurrent disjoint patches", async () => {
     const file = path.join(configD(), "opencode.json")
-    await write(file, JSON.stringify({ plugin: [[NAME, {}]] }))
+    await write(
+      file,
+      JSON.stringify({ plugins: [{ package: NAME, options: {} }] }),
+    )
     const lockFile = `${file}.lock`
     const realWriteFile = fs.writeFile.bind(fs) as (
       ...args: any[]
@@ -1646,9 +1581,8 @@ describe("opencode.json[c] as the settings source", () => {
       rename.mockRestore()
       writeFile.mockRestore()
     }
-
     expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual({
-      plugin: [[NAME, { notify: false, journal: false }]],
+      plugins: [{ package: NAME, options: { notify: false, journal: false } }],
     })
     expect(destinationRenames).toBe(2)
     expect(
@@ -1657,12 +1591,14 @@ describe("opencode.json[c] as the settings source", () => {
       ),
     ).toEqual([])
   })
-
   test("patchGlobalEntryOptions retries from a concurrent editor's replacement", async () => {
     const file = path.join(configD(), "opencode.jsonc")
     await write(
       file,
-      JSON.stringify({ plugin: [[NAME, { notify: false }]], theme: "dark" }),
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { notify: false } }],
+        theme: "dark",
+      }),
     )
     const realWriteFile = fs.writeFile.bind(fs) as (
       ...args: any[]
@@ -1684,7 +1620,9 @@ describe("opencode.json[c] as the settings source", () => {
         await realWriteFile(
           editor,
           JSON.stringify({
-            plugin: [[NAME, { notify: false, journal: false }]],
+            plugins: [
+              { package: NAME, options: { notify: false, journal: false } },
+            ],
             theme: "light",
           }),
         )
@@ -1694,7 +1632,7 @@ describe("opencode.json[c] as the settings source", () => {
     try {
       expect(
         await patchGlobalEntryOptions(configD(), undefined, project(), {
-          timeoutMs: 60_000,
+          timeoutMs: 60000,
         }),
       ).toBe("ok")
     } finally {
@@ -1702,14 +1640,23 @@ describe("opencode.json[c] as the settings source", () => {
     }
     expect(replaced).toBe(true)
     expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual({
-      plugin: [[NAME, { notify: false, journal: false, timeoutMs: 60_000 }]],
+      plugins: [
+        {
+          package: NAME,
+          options: { notify: false, journal: false, timeoutMs: 60000 },
+        },
+      ],
       theme: "light",
     })
   })
-
   test("patchGlobalEntryOptions reports persistent publication conflicts", async () => {
     const file = path.join(configD(), "opencode.json")
-    await write(file, JSON.stringify({ plugin: [[NAME, { revision: 0 }]] }))
+    await write(
+      file,
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { revision: 0 } }],
+      }),
+    )
     const realWriteFile = fs.writeFile.bind(fs) as (
       ...args: any[]
     ) => Promise<void>
@@ -1735,7 +1682,9 @@ describe("opencode.json[c] as the settings source", () => {
         const editor = `${file}.editor`
         await realWriteFile(
           editor,
-          JSON.stringify({ plugin: [[NAME, { revision }]] }),
+          JSON.stringify({
+            plugins: [{ package: NAME, options: { revision } }],
+          }),
         )
         await realRename(editor, file)
       }
@@ -1757,7 +1706,7 @@ describe("opencode.json[c] as the settings source", () => {
     expect(retryDelays[1]).toBeGreaterThanOrEqual(50)
     expect(retryDelays[1]).toBeLessThan(100)
     expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual({
-      plugin: [[NAME, { revision }]],
+      plugins: [{ package: NAME, options: { revision } }],
     })
     expect(
       (await fs.readdir(configD())).filter(
@@ -1765,10 +1714,11 @@ describe("opencode.json[c] as the settings source", () => {
       ),
     ).toEqual([])
   })
-
   test("patchGlobalEntryOptions refuses to publish after losing its lock", async () => {
     const file = path.join(configD(), "opencode.json")
-    const original = JSON.stringify({ plugin: [[NAME, { notify: false }]] })
+    const original = JSON.stringify({
+      plugins: [{ package: NAME, options: { notify: false } }],
+    })
     await write(file, original)
     const lockFile = `${file}.lock`
     const realWriteFile = fs.writeFile.bind(fs) as (
@@ -1798,7 +1748,6 @@ describe("opencode.json[c] as the settings source", () => {
     } finally {
       writeFile.mockRestore()
     }
-
     expect(replaced).toBe(true)
     expect(await fs.readFile(file, "utf8")).toBe(original)
     expect(await fs.readFile(lockFile, "utf8")).toBe("successor lock")
@@ -1806,10 +1755,11 @@ describe("opencode.json[c] as the settings source", () => {
       (await fs.readdir(configD())).filter((name) => name.endsWith(".tmp")),
     ).toEqual([])
   })
-
   test("an interrupted staged write leaves the global config intact", async () => {
     const file = path.join(configD(), "opencode.json")
-    const original = JSON.stringify({ plugin: [[NAME, { notify: false }]] })
+    const original = JSON.stringify({
+      plugins: [{ package: NAME, options: { notify: false } }],
+    })
     await write(file, original)
     const realWriteFile = fs.writeFile.bind(fs) as (
       ...args: any[]
@@ -1842,10 +1792,9 @@ describe("opencode.json[c] as the settings source", () => {
       (await fs.readdir(configD())).filter((name) => name.endsWith(".tmp")),
     ).toEqual([])
   })
-
-  test("patchGlobalEntryOptions upgrades a bare spec to a tuple", async () => {
+  test("patchGlobalEntryOptions upgrades a bare spec to a V2 package/options entry", async () => {
     const file = path.join(configD(), "opencode.json")
-    await write(file, JSON.stringify({ plugin: [NAME] }))
+    await write(file, JSON.stringify({ plugins: [NAME] }))
     expect(
       await patchGlobalEntryOptions(configD(), undefined, project(), {
         enabled: false,
@@ -1856,7 +1805,6 @@ describe("opencode.json[c] as the settings source", () => {
       throw new Error(`unexpected ${scan}`)
     expect(scan.ownOptions).toEqual({ enabled: false })
   })
-
   test("patchGlobalEntryOptions: no entry anywhere → no-entry; corrupt file → corrupt", async () => {
     expect(
       await patchGlobalEntryOptions(configD(), undefined, project(), {
@@ -1870,50 +1818,44 @@ describe("opencode.json[c] as the settings source", () => {
       }),
     ).toBe("corrupt")
   })
-
-  test("patchGlobalEntryOptions refuses to edit an entry a later plugin array shadows", async () => {
+  test("patchGlobalEntryOptions edits the retained entry despite unrelated later plugins", async () => {
+    const earlier = path.join(configD(), "opencode.json")
+    const later = path.join(configD(), "opencode.jsonc")
     await write(
-      path.join(configD(), "config.json"),
-      JSON.stringify({ plugin: [[NAME, { journal: false }]] }),
+      earlier,
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { journal: false } }],
+      }),
     )
-    await write(
-      path.join(configD(), "opencode.json"),
-      JSON.stringify({ plugin: ["some-other-plugin"] }),
-    )
+    await write(later, JSON.stringify({ plugins: ["some-other-plugin"] }))
     expect(
       await patchGlobalEntryOptions(configD(), undefined, project(), {
         enabled: false,
       }),
-    ).toBe("shadowed")
-    // The dead entry was not edited, and the winning file was not given one.
-    const earlier = await scanPluginConfigFile(
-      path.join(configD(), "config.json"),
-      undefined,
-    )
-    if (earlier === "missing" || earlier === "unreadable")
-      throw new Error(`unexpected ${earlier}`)
-    expect(earlier.ownOptions).toEqual({ journal: false })
-    const winner = await scanPluginConfigFile(
-      path.join(configD(), "opencode.json"),
-      undefined,
-    )
-    if (winner === "missing" || winner === "unreadable")
-      throw new Error(`unexpected ${winner}`)
-    expect(winner.hasOwnEntry).toBe(false)
+    ).toBe("ok")
+    expect(
+      (await readGlobalEntrySettings(configD(), undefined, project()))
+        ?.settings,
+    ).toEqual({ journal: false, enabled: false })
+    const scan = await scanPluginConfigFile(later, undefined)
+    expect(typeof scan === "object" && scan.hasOwnEntry).toBe(false)
   })
-
   test("patchGlobalEntryOptions edits the WINNING file when several declare the entry", async () => {
     await write(
-      path.join(configD(), "config.json"),
-      JSON.stringify({ plugin: [[NAME, { journal: false }]] }),
+      path.join(configD(), "opencode.json"),
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { journal: false } }],
+      }),
     )
     await write(
       path.join(configD(), "opencode.jsonc"),
-      JSON.stringify({ plugin: [[NAME, { notify: false }]] }),
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { notify: false } }],
+      }),
     )
     expect(
       await patchGlobalEntryOptions(configD(), undefined, project(), {
-        timeoutMs: 60_000,
+        timeoutMs: 60000,
       }),
     ).toBe("ok")
     const winner = await scanPluginConfigFile(
@@ -1922,27 +1864,33 @@ describe("opencode.json[c] as the settings source", () => {
     )
     if (winner === "missing" || winner === "unreadable")
       throw new Error(`unexpected ${winner}`)
-    expect(winner.ownOptions).toEqual({ notify: false, timeoutMs: 60_000 })
+    expect(winner.ownOptions).toEqual({ notify: false, timeoutMs: 60000 })
     const earlier = await scanPluginConfigFile(
-      path.join(configD(), "config.json"),
+      path.join(configD(), "opencode.json"),
       undefined,
     )
     if (earlier === "missing" || earlier === "unreadable")
       throw new Error(`unexpected ${earlier}`)
     expect(earlier.ownOptions).toEqual({ journal: false })
   })
-
   test("readPolicySnapshot merges field-wise: global under blessed worktree under project", async () => {
     await write(
       path.join(configD(), "opencode.jsonc"),
       JSON.stringify({
-        plugin: [[NAME, { model: "a/b", timeoutMs: 30_000, journal: false }]],
+        plugins: [
+          {
+            package: NAME,
+            options: { model: "a/b", timeoutMs: 30000, journal: false },
+          },
+        ],
       }),
     )
     const worktree = path.join(project(), ".opencode", "opencode.json")
     await write(
       worktree,
-      JSON.stringify({ plugin: [[NAME, { timeoutMs: 45_000 }]] }),
+      JSON.stringify({
+        plugins: [{ package: NAME, options: { timeoutMs: 45000 } }],
+      }),
     )
     await writeBlessing(blessFile(stateD(), project()), {
       files: { [worktree]: sha256Hex(await fs.readFile(worktree, "utf8")) },
@@ -1968,7 +1916,6 @@ describe("opencode.json[c] as the settings source", () => {
     expect(snapshot.blessedFiles).toEqual([worktree])
     expect(snapshot.globalSource).toBe(path.join(configD(), "opencode.jsonc"))
   })
-
   test("readPolicySnapshot faults, in precedence order", async () => {
     // The retired bespoke global file wins over everything else.
     await write(
@@ -1980,21 +1927,21 @@ describe("opencode.json[c] as the settings source", () => {
       file: path.join(configD(), "permissions-approve-for-me.json"),
     })
     await fs.rm(path.join(configD(), "permissions-approve-for-me.json"))
-
     await write(path.join(configD(), "opencode.json"), "{broken")
     expect((await readPolicySnapshot(snapshotInput())).fault).toEqual({
       kind: "global-unreadable",
     })
     await fs.rm(path.join(configD(), "opencode.json"))
-
     const worktree = path.join(project(), "opencode.jsonc")
-    await write(worktree, JSON.stringify({ plugin: [[NAME, {}]] }))
+    await write(
+      worktree,
+      JSON.stringify({ plugins: [{ package: NAME, options: {} }] }),
+    )
     expect((await readPolicySnapshot(snapshotInput())).fault).toEqual({
       kind: "worktree-unblessed",
       files: [worktree],
     })
     await fs.rm(worktree)
-
     await fs.mkdir(path.dirname(projectSettingsFile(configD(), project())), {
       recursive: true,
     })
@@ -2003,7 +1950,6 @@ describe("opencode.json[c] as the settings source", () => {
       kind: "project-unreadable",
     })
   })
-
   test("a healthy empty pipeline resolves to plain defaults", async () => {
     const snapshot = await readPolicySnapshot(snapshotInput())
     expect(snapshot.fault).toBeUndefined()

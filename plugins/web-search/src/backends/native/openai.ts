@@ -177,9 +177,15 @@ export async function openaiSearch(
   signal: AbortSignal,
 ): Promise<string> {
   const base = (config.baseURL ?? OPENAI_DEFAULT_BASE_URL).replace(/\/$/, "")
+  const headers = mergeHeaders(
+    { Authorization: `Bearer ${config.apiKey}` },
+    config.headers,
+    config.oauth ? { Authorization: `Bearer ${config.apiKey}` } : undefined,
+  )
+  if (config.oauth) delete headers["x-api-key"]
   const response = await postJson(
     `${base}/responses`,
-    mergeHeaders({ Authorization: `Bearer ${config.apiKey}` }, config.headers),
+    headers,
     responsesRequestBody(config, query, false),
     signal,
   )

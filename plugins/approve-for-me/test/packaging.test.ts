@@ -1,14 +1,14 @@
 import { describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
-import { describePackaging } from "@macarons/plugin-test-harness"
+import plugin from "../index"
 
 const ROOT = path.join(import.meta.dir, "..")
 
-describePackaging({
-  testDir: import.meta.dir,
-  serverExport: "ApproveForMePlugin",
-  tui: true,
+test("native default plugin entry is loadable", () => {
+  expect(plugin.id).toBe("macarons.approve-for-me")
+  expect(typeof plugin.setup).toBe("function")
 })
 
 describe("the published artifact carries what the README promises", () => {
@@ -21,6 +21,10 @@ describe("the published artifact carries what the README promises", () => {
     async () => {
       const proc = Bun.spawnSync(["npm", "pack", "--dry-run", "--json"], {
         cwd: ROOT,
+        env: {
+          ...process.env,
+          npm_config_cache: path.join(os.tmpdir(), "macarons-npm-cache"),
+        },
       })
       if (!proc.success)
         throw new Error(`npm pack --dry-run failed: ${proc.stderr.toString()}`)

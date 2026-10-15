@@ -111,7 +111,6 @@ export {
   worktreeConfigCandidates,
   writeBlessing,
 } from "./shared/config-policy"
-export { requestInstanceID, respondInstanceRequest } from "./shared/instance"
 export type {
   Activity,
   ActivityEntry,

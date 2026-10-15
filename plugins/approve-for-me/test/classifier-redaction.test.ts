@@ -5,17 +5,13 @@ import {
   Redactor,
   redactWireRequest,
 } from "../../redact-secrets/src/shared"
-import {
-  type classifierMessage,
-  createClassifierPipeline,
-} from "../src/server/classifier"
 import { type ClassifierRequest, TRUNCATE_SUFFIX } from "../src/shared"
+import { classifierHarness } from "./classifier-harness"
 
 // Synthetic, shape-valid 40-character PAT. No provider authentication is used.
 const PAT = `ghp_${"A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"}`
 const scope = {
   directory: "/test/classifier-redaction",
-  serverUrl: "http://classifier-redaction.test",
 }
 const judge = { model: { providerID: "separate-judge", modelID: "gate" } }
 const request: ClassifierRequest = {
@@ -30,42 +26,11 @@ afterEach(() => {
 })
 
 function harness() {
-  const messages: ReturnType<typeof classifierMessage>[] = []
-  const calls: string[] = []
-  const logs: string[] = []
-  const isolatedClassifierSessions = new Set<string>()
-  const pipeline = createClassifierPipeline({
-    ...scope,
-    classifierSessions: new Set(),
-    isolatedClassifierSessions,
-    textOfParts: () => "",
-    log: (_level, message) => logs.push(message),
-    api: async (method, pathname, body) => {
-      calls.push(`${method} ${pathname}`)
-      if (pathname === "/session") return { id: "ses_judge" }
-      if (pathname.endsWith("/message")) {
-        messages.push(body as ReturnType<typeof classifierMessage>)
-        isolatedClassifierSessions.add("ses_judge")
-        return {
-          info: {
-            structured: {
-              decision: "approve",
-              risk: "low",
-              authorization: "implied",
-              reason: "safe fixture",
-            },
-          },
-        }
-      }
-      return true
-    },
-  })
+  const api = classifierHarness({ directory: scope.directory })
   return {
-    messages,
-    calls,
-    logs,
+    ...api,
     classify: (source: ClassifierRequest) =>
-      pipeline.classify(source, judge, 1_000, new AbortController().signal),
+      api.classify(source, judge, 1_000, new AbortController().signal),
   }
 }
 

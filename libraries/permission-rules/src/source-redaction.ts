@@ -1,6 +1,7 @@
 type SourceRedactionScope = {
-  serverUrl: string | URL
+  serverUrl?: string | URL
   directory: string
+  workspaceID?: string
 }
 
 type SourceRedactor = { redact: (value: unknown) => void }
@@ -16,7 +17,11 @@ function sourceRedactors(): Map<string, SourceRedactor> {
 }
 
 function scopeKey(scope: SourceRedactionScope): string {
-  return JSON.stringify([new URL(scope.serverUrl).href, scope.directory])
+  return JSON.stringify([
+    scope.serverUrl === undefined ? undefined : new URL(scope.serverUrl).href,
+    scope.workspaceID,
+    scope.directory,
+  ])
 }
 
 /**

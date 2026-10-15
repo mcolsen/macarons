@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import path from "node:path"
 
 /**
@@ -30,14 +30,22 @@ function gitLsFiles(...patterns: string[]): string[] {
   // as a top-level package.
   const out = execFileSync(
     "git",
-    ["ls-files", ...patterns.map((p) => `:(glob)${p}`)],
+    [
+      "ls-files",
+      "--cached",
+      "--others",
+      "--exclude-standard",
+      ...patterns.map((p) => `:(glob)${p}`),
+    ],
     {
       cwd: REPO_ROOT,
       encoding: "utf8",
       maxBuffer: 8 * 1024 * 1024,
     },
   )
-  return out.split("\n").filter(Boolean)
+  return out
+    .split("\n")
+    .filter((file) => file && existsSync(path.join(REPO_ROOT, file)))
 }
 
 /** Distinct immediate SUBdirectories of each package root, tracked paths only. */
@@ -67,7 +75,7 @@ describe("every tracked package directory is a real @macarons package", () => {
     // installer). The floor only guards against a broken or empty
     // enumeration, so it keeps headroom below the real count — retiring a
     // package should not trip it.
-    expect(packageDirs.length).toBeGreaterThanOrEqual(10)
+    expect(packageDirs.length).toBeGreaterThanOrEqual(8)
   })
 
   test("each holds a tracked package.json named @macarons/<dir>", () => {

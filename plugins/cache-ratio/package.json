@@ -1,14 +1,15 @@
 {
   "name": "@macarons/cache-ratio",
-  "version": "0.1.0",
-  "description": "OpenCode TUI plugin that tracks the prompt-cache hit ratio of the session's input tokens in the sidebar and raises a red alert + toast when a request appears to have broken the prompt-cache prefix",
+  "version": "0.2.0",
+  "description": "OpenCode v2 live cache-health ratios, prefix-loss alerts, and expiry detection",
   "type": "module",
   "exports": {
     "./tui": "./src/tui.tsx"
   },
   "files": [
     "LICENSE",
-    "src"
+    "src",
+    "tui.tsx"
   ],
   "scripts": {
     "lint": "biome check src test",
@@ -16,7 +17,7 @@
     "typecheck": "tsc --noEmit"
   },
   "engines": {
-    "opencode": ">=1.17.14 <2.0.0"
+    "opencode": ">=2.0.29 <3.0.0"
   },
   "keywords": [
     "opencode",
@@ -27,19 +28,19 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@macarons/permission-rules": "workspace:*"
+    "@macarons/permission-rules": "workspace:*",
+    "@opencode/plugin": "2.0.29"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
-    "@macarons/plugin-test-harness": "workspace:*",
-    "@opencode-ai/plugin": "1.18.14",
-    "@opencode-ai/sdk": "1.18.14",
-    "@opentui/core": "0.5.12",
-    "@opentui/keymap": "0.5.12",
-    "@opentui/solid": "0.5.12",
+    "@opentui/core": "0.5.17",
+    "@opentui/keymap": "0.5.17",
+    "@opentui/solid": "0.5.17",
     "@types/bun": "^1.4.2",
     "@types/node": "^26.6.2",
     "solid-js": "1.9.15",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "@opencode/client": "2.0.29",
+    "@opencode/theme": "2.0.29"
   }
 }

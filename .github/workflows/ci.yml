@@ -242,265 +242,70 @@ jobs:
       - name: Build
         run: bun run build
 
-  # Sharded one runner per suite. These ran as a single serial chain until the
-  # aggregate hit the 8m job timeout (every test passing, killed mid-cleanup);
-  # sharding puts each suite on its own clock instead of a shared budget that
-  # any new coverage can exhaust. Each `suite` value must name an `e2e:<suite>`
-  # script in tests/e2e/package.json — `bun run e2e:server` still chains them
-  # all serially for local runs.
   e2e-server:
-    name: Real OpenCode server E2E (${{ matrix.suite }})
+    name: OpenCode v2 E2E (${{ matrix.suite }})
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 8
     strategy:
-      # One suite's failure should not mask the rest of the matrix.
       fail-fast: false
       matrix:
         suite:
-          - core
-          - btw
-          - background-tasks
-          - bundle
-          - concurrency
-          - cron
-          - subagent-comms
-          - redact-secrets
-          - scoped-system-prompts
-          - web-search
+          - server
           - install
     env:
       E2E_ARTIFACTS_DIR: ${{ github.workspace }}/artifacts/e2e
-
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
       - name: Resolve pinned OpenCode version
         run: |
           version="$(cat .opencode-version)"
           test -n "$version"
           echo "OPENCODE_E2E_VERSION=$version" >> "$GITHUB_ENV"
-
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-
       - name: Install dependencies
         run: bun ci
-
-      # Shared across shards so the fan-out does not turn one release download
-      # into twelve. A miss or a corrupted restore is safe: the harness
-      # re-verifies the cached binary against its install-time SHA-256 sidecar
-      # and re-downloads on mismatch.
-      - name: Cache pinned OpenCode binary
+      - name: Cache verified OpenCode binary
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/macarons-e2e
           key: macarons-e2e-${{ runner.os }}-${{ env.OPENCODE_E2E_VERSION }}
-
-      - name: Run ${{ matrix.suite }} journey
+      - name: Run native v2 journey
         run: bun run --cwd tests/e2e e2e:${{ matrix.suite }}
-
       - name: Upload E2E diagnostics
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          # Per-shard name: upload-artifact@v4 errors on duplicate names.
-          name: opencode-e2e-server-artifacts-${{ matrix.suite }}
+          name: opencode-e2e-${{ matrix.suite }}
           path: artifacts/e2e
           if-no-files-found: ignore
 
-  # This is an upstream dependency contract, not a claim that the unpatched
-  # release is fixed. Keep it gating and explicitly pinned until the host fix
-  # ships; the normal binary-based suites still test the stock release.
-  e2e-background-shutdown:
-    name: Background shutdown (patched real host)
-    needs: verify
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      OPENCODE_E2E_SOURCE: ${{ github.workspace }}/upstream-opencode
-      E2E_ARTIFACTS_DIR: ${{ github.workspace }}/artifacts/e2e
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.3.14
-
-      - name: Install plugin dependencies
-        run: bun ci
-
-      - name: Check out pinned real host
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: sst/opencode
-          ref: 65cf14df16c191f3e9684f0d9a8bae69103ced6d # v1.18.14
-          path: upstream-opencode
-          persist-credentials: false
-
-      - name: Install pinned host dependencies without lifecycle scripts
-        working-directory: upstream-opencode
-        run: bun install --frozen-lockfile --ignore-scripts
-
-      - name: Apply required upstream lifecycle change
-        run: git -C upstream-opencode apply ../tests/e2e/background-tasks/opencode-shutdown.patch
-
-      - name: Check host lifecycle invariants and types
-        working-directory: upstream-opencode/packages/opencode
-        run: |
-          bun test --timeout 30000 test/project/instance.test.ts test/effect/instance-state.test.ts test/project/instance-bootstrap.test.ts test/plugin/loader-shared.test.ts test/cli/tui/thread.test.ts
-          bun typecheck
-
-      - name: Exercise normal TUI exit with two cached directories
-        run: bun run --cwd tests/e2e e2e:background-tasks:shutdown
-
-      - name: Upload shutdown diagnostics
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: opencode-e2e-background-shutdown-artifacts
-          path: artifacts/e2e
-          if-no-files-found: ignore
-
-  # Gating, unlike e2e-tui below: this suite is the only coverage of the
-  # standalone (in-process host, serverUrl never bound) transport regression
-  # class, and its tmux use is driver-stable — type, Enter, and generous
-  # waitForText polls, none of the animation- and keybind-timing the
-  # interactive journeys depend on.
-  e2e-tui-standalone:
-    name: Standalone OpenCode TUI E2E
-    needs: e2e-server
-    runs-on: ubuntu-latest
-    timeout-minutes: 8
-    env:
-      E2E_ARTIFACTS_DIR: ${{ github.workspace }}/artifacts/e2e
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Resolve pinned OpenCode version
-        run: |
-          version="$(cat .opencode-version)"
-          test -n "$version"
-          echo "OPENCODE_E2E_VERSION=$version" >> "$GITHUB_ENV"
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-
-      - name: Install dependencies
-        run: bun ci
-
-      - name: Install tmux
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes tmux
-
-      - name: Run standalone TUI journey
-        run: bun run --cwd tests/e2e e2e:tui:standalone
-
-      - name: Upload standalone TUI diagnostics
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: opencode-e2e-tui-standalone-artifacts
-          path: artifacts/e2e
-          if-no-files-found: ignore
-
-  # Gating, like e2e-tui-standalone: the driver-stable persist-permissions and
-  # provider-limit journeys use waitForText for positive transitions; Codex's
-  # negative assertions use bounded settle windows. None rely on chorded keybinds
-  # or sidebar-animation timing, matching the driver profile the standalone job
-  # already gates on. This is a SIBLING of the advisory e2e-tui below, not an
-  # addition to it: the "do not add must-pass
-  # coverage to e2e-tui" rule stands, and the animation/keybind journeys stay
-  # advisory there. Adding gating coverage means adding a file to e2e:tui:gating.
   e2e-tui-gating:
-    name: Non-animated TUI E2E (gating)
+    name: OpenCode v2 TUI E2E (gating)
     needs: e2e-server
     runs-on: ubuntu-latest
     timeout-minutes: 8
     env:
       E2E_ARTIFACTS_DIR: ${{ github.workspace }}/artifacts/e2e
-
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Resolve pinned OpenCode version
-        run: |
-          version="$(cat .opencode-version)"
-          test -n "$version"
-          echo "OPENCODE_E2E_VERSION=$version" >> "$GITHUB_ENV"
-
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-
       - name: Install dependencies
         run: bun ci
-
       - name: Install tmux
         run: |
           sudo apt-get update
           sudo apt-get install --yes tmux
-
-      - name: Run non-animated TUI journeys
+      - name: Run native TUI journey
         run: bun run --cwd tests/e2e e2e:tui:gating
-
-      - name: Upload gating TUI diagnostics
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: opencode-e2e-tui-gating-artifacts
-          path: artifacts/e2e
-          if-no-files-found: ignore
-
-  e2e-tui:
-    name: Real OpenCode TUI E2E
-    needs: e2e-server
-    runs-on: ubuntu-latest
-    timeout-minutes: 8
-    # Advisory on purpose: these are the animation- and chorded-keybind-timing
-    # journeys (cache-ratio fade, background-tasks poke, paff ctrl+alt+a, …) that
-    # establish their flake budget here. The driver-stable journeys gate in
-    # e2e-tui-gating above, and the standalone suite in e2e-tui-standalone; do
-    # not add more must-pass coverage to THIS job — add it to e2e:tui:gating.
-    continue-on-error: true
-    env:
-      E2E_ARTIFACTS_DIR: ${{ github.workspace }}/artifacts/e2e
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Resolve pinned OpenCode version
-        run: |
-          version="$(cat .opencode-version)"
-          test -n "$version"
-          echo "OPENCODE_E2E_VERSION=$version" >> "$GITHUB_ENV"
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-
-      - name: Install dependencies
-        run: bun ci
-
-      - name: Install tmux
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes tmux
-
-      - name: Run TUI journey
-        run: bun run e2e:tui
-
       - name: Upload TUI diagnostics
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: opencode-e2e-tui-artifacts
+          name: opencode-e2e-tui
           path: artifacts/e2e
           if-no-files-found: ignore

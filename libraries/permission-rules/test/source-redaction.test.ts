@@ -190,3 +190,21 @@ describe("optional source redaction", () => {
     expect(consumer.redactSourceValue(scope, "source")).toBe("source")
   })
 })
+
+test("native v2 registrations are isolated by directory and workspace", () => {
+  const location = { directory: "/native-project", workspaceID: "workspace-a" }
+  const stop = registerSourceRedactor(location, (holder) => {
+    ;(holder as unknown[])[0] = "masked"
+  })
+  try {
+    expect(redactSourceValue(location, "source")).toBe("masked")
+    expect(
+      redactSourceValue({ ...location, workspaceID: "workspace-b" }, "source"),
+    ).toBe("source")
+    expect(
+      redactSourceValue({ ...location, directory: "/other-project" }, "source"),
+    ).toBe("source")
+  } finally {
+    stop()
+  }
+})

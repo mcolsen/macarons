@@ -453,6 +453,39 @@ describe("runCli confirmation", () => {
     return `${JSON.stringify({ plugin: entries }, null, 2)}\n`
   }
 
+  test("unmigrated UI settings require the host migration before creating cli.json", async () => {
+    const target = await fixture()
+    const legacy = '{ "theme":"custom", "plugin":["@macarons/plain/tui"] }\n'
+    const file = path.join(target.configDir, "tui.json")
+    await fs.writeFile(file, legacy)
+    await expect(
+      runCli(
+        runtime(target, {
+          loadPlugins: async () => [
+            { ...plugin, tuiEntry: "/repo/plugins/plain/src/tui.tsx" },
+          ],
+          createPrompter: scriptedPrompter([]).createPrompter,
+        }),
+      ),
+    ).rejects.toThrow("Start OpenCode v2 once")
+    expect(target.writeCalls).toBe(0)
+    expect(await fs.readFile(file, "utf8")).toBe(legacy)
+  })
+
+  test("retired plugins appear as removals in the reviewed plan", async () => {
+    const target = await fixture()
+    await fs.writeFile(
+      target.configFile,
+      '{"plugin":["@macarons/background-tasks","unrelated"]}\n',
+    )
+    const prompt = scriptedPrompter(["yes"])
+    await runCli(runtime(target, { createPrompter: prompt.createPrompter }))
+    expect(target.output.join("\n")).toContain("background-tasks")
+    expect(
+      JSON.parse(await fs.readFile(target.configFile, "utf8")).plugin,
+    ).toEqual(["unrelated"])
+  })
+
   test("an explicit yes applies the plan only after it has been printed", async () => {
     const target = await fixture()
     const prompt = scriptedPrompter(["yes"], () => {
@@ -477,7 +510,7 @@ describe("runCli confirmation", () => {
     const written = await fs.readFile(target.configFile, "utf8")
     expect(written).not.toBe(target.original)
     expect(written).toContain('"model": "provider/model"')
-    expect(written).toContain("plain/src/index.ts")
+    expect(written).toContain("file:///repo/plugins/plain")
   })
 
   test("blank default and explicit no both decline without any write", async () => {
@@ -504,7 +537,7 @@ describe("runCli confirmation", () => {
       "Please answer y or n.\nApply these changes? [y/N]: ",
     ])
     expect(await fs.readFile(target.configFile, "utf8")).toContain(
-      "plain/src/index.ts",
+      "file:///repo/plugins/plain",
     )
   })
 
@@ -637,7 +670,6 @@ describe("runCli confirmation", () => {
     const stages = [
       { label: "URL", matches: /SearXNG/ },
       { label: "native", matches: /provider-native/ },
-      { label: "Exa", matches: /Exa/ },
     ]
 
     for (const stage of stages) {
@@ -807,28 +839,28 @@ describe("runCli confirmation", () => {
 
       expect(target.writeCalls).toBe(2)
       expect(await fs.readFile(target.configFile, "utf8")).toContain(
-        "plain/src/index.ts",
+        "file:///repo/plugins/plain",
       )
       expect(
         JSON.parse(
-          await fs.readFile(path.join(target.configDir, "tui.json"), "utf8"),
-        ).plugin,
-      ).toEqual(["file:///repo/plugins/plain/src/tui.tsx"])
+          await fs.readFile(path.join(target.configDir, "cli.json"), "utf8"),
+        ).plugins,
+      ).toEqual(["file:///repo/plugins/plain"])
       expect((await fs.readdir(target.configDir)).sort()).toEqual([
+        "cli.json",
         "opencode.jsonc",
-        "tui.json",
       ])
       expect(target.output.join("\n")).toContain("Done. Restart OpenCode")
     },
   )
 
   test.each([
-    ["existing non-target", "opencode.jsonc", "opencode.json"],
-    ["absent non-target", "config.json", "opencode.json"],
-    ["existing non-target", "opencode.jsonc", "tui.json"],
-    ["absent non-target", "config.json", "tui.json"],
-    ["already-written destination", "opencode.json", "tui.json"],
-    ["later destination", "tui.json", "opencode.json"],
+    ["existing non-target", "opencode.json", "opencode.jsonc"],
+    ["absent non-target", "config.json", "opencode.jsonc"],
+    ["existing non-target", "opencode.json", "cli.json"],
+    ["absent non-target", "config.json", "cli.json"],
+    ["already-written destination", "opencode.jsonc", "cli.json"],
+    ["later destination", "cli.json", "opencode.jsonc"],
   ])(
     "a changed %s (%s) while staging %s aborts publication",
     async (_label, changedBase, stagedBase) => {
@@ -865,27 +897,19 @@ describe("runCli confirmation", () => {
           ),
           changedFile,
           editorText,
-          stagedBase === "opencode.json" ? 1 : 2,
+          stagedBase === "opencode.jsonc" ? 1 : 2,
         )
       } finally {
         write.mockRestore()
       }
 
       expect(raced).toBe(true)
-      if (stagedBase === "opencode.json") {
+      if (changedFile !== lowerFile)
         expect(await fs.readFile(lowerFile, "utf8")).toBe(original)
-      } else if (changedFile !== lowerFile) {
-        expect(JSON.parse(await fs.readFile(lowerFile, "utf8")).plugin).toEqual(
-          ["unrelated", "file:///repo/plugins/plain/src/index.ts"],
-        )
-      }
-      if (changedFile !== target.configFile)
+      if (stagedBase === "opencode.jsonc" && changedFile !== target.configFile)
         expect(await fs.readFile(target.configFile, "utf8")).toBe(
           target.original,
         )
-      expect((await fs.readdir(target.configDir)).sort()).toEqual(
-        [...new Set(["opencode.json", "opencode.jsonc", changedBase])].sort(),
-      )
     },
   )
 
@@ -935,12 +959,14 @@ describe("runCli confirmation", () => {
     expect(prompt.state.asked).toEqual(["\nApply these changes? [y/N]: "])
     expect(prompt.state.created).toBe(1)
     expect(target.renderCalls).toBe(1)
-    expect(target.writeCalls).toBe(1)
+    expect(target.writeCalls).toBe(2)
     const repaired = await fs.readFile(target.configFile, "utf8")
-    expect(JSON.parse(repaired).plugin).toEqual([
-      [serverEntryUrl(websearch), savedOptions],
+    expect(JSON.parse(repaired).plugins).toEqual([
+      { package: serverEntryUrl(websearch), options: savedOptions },
     ])
-    expect(await fs.readFile(opencodeJson, "utf8")).toBe(original)
+    expect(JSON.parse(await fs.readFile(opencodeJson, "utf8")).plugin).toEqual(
+      [],
+    )
     expect(target.output.join("\n")).not.toContain(endpoint)
 
     const repeatPrompt = scriptedPrompter([])
@@ -1022,15 +1048,13 @@ describe("runCli confirmation", () => {
 
     expect(caught).toBeInstanceOf(Error)
     const message = caught instanceof Error ? caught.message : String(caught)
-    expect(message).toContain("conflicting masked declarations")
+    expect(message).toContain("conflicting saved declarations")
     expect(message).toContain("web-search")
     expect(message).toContain("server")
     expect(message).toContain(configJson)
     expect(message).toContain(opencodeJson)
     expect(message).toMatch(/make .*declarations identical/i)
-    expect(message).toContain(
-      "rerun the wizard and untick web-search to remove all of its entries instead",
-    )
+    expect(message).toContain("untick web-search to remove its entries")
     expect(message).toContain("no files were changed")
     expect(prompt.state.created).toBe(0)
     expect(target.renderCalls).toBe(0)
@@ -1066,7 +1090,7 @@ describe("runCli confirmation", () => {
       expect(JSON.parse(await fs.readFile(file, "utf8")).plugin).toEqual([])
     }
     expect(
-      JSON.parse(await fs.readFile(target.configFile, "utf8")).plugin,
+      JSON.parse(await fs.readFile(target.configFile, "utf8")).plugins,
     ).toEqual([serverEntryUrl(plugin)])
     for (const value of privateValues) {
       expect(target.output.join("\n")).not.toContain(value)

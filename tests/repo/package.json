@@ -15,6 +15,11 @@
     "@types/bun": "^1.4.2",
     "@types/node": "^26.6.2",
     "@typescript/typescript6": "^6.0.2",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "@macarons/plugin-test-harness": "workspace:*",
+    "@opentui/solid": "0.5.17",
+    "@opentui/core": "0.5.17",
+    "solid-js": "1.9.15",
+    "@opencode/theme": "2.0.29"
   }
 }

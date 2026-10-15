@@ -49,12 +49,10 @@ export type WebsearchAnswers = {
   searxngUrl: string
   /** Allow the active provider's native web search (default on). */
   native: boolean
-  /** Allow the Exa last-resort call (default on). */
-  exa: boolean
 }
 
 /**
- * Assemble the `[spec, options]` payload from install answers. Only values that
+ * Assemble the `{ package, options }` payload from install answers. Only values that
  * DIFFER from the plugin's own defaults are written — a blank URL omits
  * `searxng`, and a still-enabled backend omits its key — so accepting every
  * default yields `undefined` and the installer writes a bare string entry,
@@ -66,10 +64,9 @@ export function buildWebsearchOptions(
   const options: Record<string, unknown> = {}
   const url = answers.searxngUrl.trim()
   if (url) options.searxng = { url }
-  // native/exa default to enabled, so only an explicit opt-OUT needs writing.
+  // Native provider search defaults to enabled, so only an explicit opt-OUT needs writing.
   // The plugin reads any non-`true` value as disabled; `false` is the token.
   if (!answers.native) options.native = { enabled: false }
-  if (!answers.exa) options.exa = { enabled: false }
   return Object.keys(options).length ? options : undefined
 }
 
@@ -117,7 +114,7 @@ export async function promptYesNo(
 /**
  * Prompt for the web-search backend configuration and return the options object
  * to write (or undefined for all-defaults). The question order is fixed so a
- * unit test can script answers positionally. Both backends default to enabled;
+ * unit test can script answers positionally. Provider search defaults to enabled;
  * the SearXNG URL is the one value with no sensible default, so a blank line
  * simply leaves that backend out of the chain.
  */
@@ -132,12 +129,7 @@ export async function promptWebsearchOptions(
     "  Enable provider-native web search? [Y/n]: ",
     true,
   )
-  const exa = await promptYesNo(
-    prompter,
-    "  Enable Exa last-resort search? [Y/n]: ",
-    true,
-  )
-  return buildWebsearchOptions({ searxngUrl, native, exa })
+  return buildWebsearchOptions({ searxngUrl, native })
 }
 
 /**

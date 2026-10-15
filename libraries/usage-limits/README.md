@@ -1,18 +1,20 @@
 # @macarons/usage-limits
 
-Provider-neutral contracts and a headless TUI engine shared by the limits
-plugins in Macarons.
+Shared quota types, formatting, polling, and native OpenCode v2 RPC support for
+Codex Limits and Synthetic Limits.
 
-The library owns quota snapshot shapes, quota-time formatting, provider relevance,
-authentication synchronization, polling, classifier relevance, and lifecycle
-cleanup. Provider-specific authentication and API parsing stay in each plugin.
-JSX and runtime Solid imports also stay in each plugin's `src/tui.tsx`: OpenCode
-substitutes its Solid runtime only for the entry module, so moving rendering or
-signal creation behind a normal library import would create a second,
-non-reactive Solid graph.
+Provider modules normalize backend responses and retain their account-change,
+backoff, and stale-response rules. The server adapter resolves credentials
+through `integration.connection.active/resolve`, rechecks identity after I/O,
+and returns only quota windows. The TUI engine reads those snapshots through
+RPC, refreshes on model changes, hides child-session widgets, and queries the
+optional Approve for Me classifier-provider RPC.
 
-The engine never reads the TUI's environment or home for provider credentials:
-loopback and matching path strings do not establish a server auth scope. A
-provider needing stored OAuth must supply a server-verified reader, as Codex
-does through its server companion. Server-resolved provider keys remain
-available through `ProviderContext.provider`, including for Synthetic attaches.
+The TUI never reads auth files or makes authenticated provider requests.
+The entry module supplies Solid reactive primitives so widgets share the host's
+Solid runtime. The server uses a small in-memory signal implementation.
+
+```sh
+bun run --cwd libraries/usage-limits test
+bun run --cwd libraries/usage-limits typecheck
+```

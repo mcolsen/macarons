@@ -1,7 +1,7 @@
 {
   "name": "@macarons/scoped-system-prompts",
-  "version": "0.1.0",
-  "description": "OpenCode plugin that replaces, prepends, or appends system prompts for exact provider/model pairs",
+  "version": "0.2.0",
+  "description": "OpenCode v2 ordered system-prompt rules for exact provider/model pairs",
   "type": "module",
   "main": "./src/index.ts",
   "exports": {
@@ -10,7 +10,8 @@
   },
   "files": [
     "LICENSE",
-    "src"
+    "src",
+    "index.ts"
   ],
   "scripts": {
     "build": "bun build src/index.ts --target=bun --outfile=dist/scoped-system-prompts.js",
@@ -19,7 +20,7 @@
     "typecheck": "tsc --noEmit"
   },
   "engines": {
-    "opencode": ">=1.17.14 <2.0.0"
+    "opencode": ">=2.0.29 <3.0.0"
   },
   "keywords": [
     "opencode",
@@ -29,15 +30,14 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@macarons/permission-rules": "workspace:*"
+    "@macarons/permission-rules": "workspace:*",
+    "@opencode/plugin": "2.0.29"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
-    "@macarons/plugin-test-harness": "workspace:*",
-    "@opencode-ai/plugin": "1.18.14",
-    "@opencode-ai/sdk": "1.18.14",
     "@types/bun": "^1.4.2",
     "@types/node": "^26.6.2",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "@opencode/client": "2.0.29"
   }
 }

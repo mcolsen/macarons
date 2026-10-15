@@ -1,7 +1,7 @@
 {
   "name": "@macarons/redact-secrets",
-  "version": "0.1.0",
-  "description": "OpenCode plugin that detects secrets in outbound model requests with a vendored betterleaks rule set and replaces them with placeholders in flight, restoring the real values locally in tool arguments and completed responses — a last line of defense for stray keys on disk or in the environment",
+  "version": "0.2.0",
+  "description": "OpenCode v2 secret redaction for session model requests, with local tool argument restoration",
   "type": "module",
   "main": "./src/index.ts",
   "exports": {
@@ -10,18 +10,19 @@
   },
   "files": [
     "LICENSE",
+    "index.ts",
     "src",
     "vendor"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --target=bun --outfile=dist/redact-secrets.js",
+    "build": "bun build src/index.ts --target=bun --packages=external --outfile=dist/redact-secrets.js",
     "lint": "biome check src test scripts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "vendor": "bun scripts/vendor-rules.ts"
   },
   "engines": {
-    "opencode": ">=1.17.14 <2.0.0"
+    "opencode": ">=2.0.29 <3.0.0"
   },
   "keywords": [
     "opencode",
@@ -32,12 +33,12 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@macarons/permission-rules": "workspace:*",
-    "@opencode-ai/plugin": "1.18.14"
+    "@opencode/plugin": "2.0.29",
+    "@opencode/ai": "2.0.29",
+    "@macarons/permission-rules": "workspace:*"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
-    "@macarons/plugin-test-harness": "workspace:*",
     "@types/bun": "^1.4.2",
     "@types/node": "^26.6.2",
     "typescript": "^7.0.2"

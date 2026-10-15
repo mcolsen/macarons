@@ -203,9 +203,11 @@ export function createFilesystemLocalityResponder(input: {
           type?: unknown
           properties?: { command?: unknown }
         } | null
-        const command = candidate?.properties?.command
+        const command =
+          typeof event === "string" ? event : candidate?.properties?.command
         if (
-          candidate?.type !== "tui.command.execute" ||
+          (typeof event !== "string" &&
+            candidate?.type !== "tui.command.execute") ||
           typeof command !== "string" ||
           command.length > 200
         )
@@ -362,7 +364,7 @@ export function createFilesystemLocalityResponder(input: {
 
 /**
  * Prove bidirectional sharing of every required root using temporary markers,
- * never policy writes. `api` is TuiPluginApi (SDK v2); its lifecycle signal cancels the check.
+ * never policy writes. `api` supplies a transport-neutral publish callback and optional abort signal.
  * Paths are the ordered config, policy-containing directories, and project
  * roots that both halves require. The helper never creates directories.
  * No URL, matching path string, cached marker, or successful HTTP reply is
@@ -399,41 +401,29 @@ export async function verifyFilesystemLocality(
       !path.isAbsolute(input.directory)
     )
       return false
-    const host = api as {
-      client?: {
-        tui?: {
-          publish?: (parameters: unknown, options: unknown) => Promise<unknown>
-        }
-      }
-      lifecycle?: { signal?: AbortSignal }
+    const transport = api as {
+      publish?: (command: string, signal: AbortSignal) => Promise<unknown>
+      signal?: AbortSignal
     } | null
-    const tui = host?.client?.tui
-    if (typeof tui?.publish !== "function") return false
-    lifecycleSignal = host?.lifecycle?.signal
+    if (typeof transport?.publish !== "function") return false
+    lifecycleSignal = transport.signal
     const signal = lifecycleSignal
       ? AbortSignal.any([controller.signal, lifecycleSignal])
       : controller.signal
     if (signal.aborted) return false
     const timeoutMs = input.timeoutMs ?? 3_000
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return false
-    const flights = verifierFlights.get(tui) ?? 0
+    const flights = verifierFlights.get(transport) ?? 0
     if (flights >= MAX_PENDING) return false
-    owner = tui
+    owner = transport
     verifierFlights.set(owner, flights + 1)
     const budget = Math.min(timeoutMs, MAX_TIMEOUT_MS)
     deadline = Date.now() + budget
     const nonce = randomUUID()
     const token = randomUUID()
-    const send = tui.publish.bind(tui)
+    const send = transport.publish.bind(transport)
     publish = (command, signal) => {
-      const request = (async () =>
-        send(
-          {
-            directory: input.directory,
-            body: { type: "tui.command.execute", properties: { command } },
-          },
-          { signal },
-        ))()
+      const request = send(command, signal)
       requests.push(request)
       return request
     }

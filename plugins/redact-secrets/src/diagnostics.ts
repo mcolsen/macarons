@@ -1,6 +1,16 @@
 import { AsyncLocalStorage } from "node:async_hooks"
-import type { AppLogger, ServerToast } from "@macarons/permission-rules"
 import { FINGERPRINT_MAX_CANDIDATES, type ScanLimitInfo } from "./shared"
+
+type AppLogger = (
+  level: "info" | "warn" | "error",
+  message: string,
+  extra?: Record<string, unknown>,
+) => boolean
+type ServerToast = (
+  variant: "info" | "warning" | "error" | "success",
+  message: string,
+  options?: { title?: string; duration?: number },
+) => boolean
 
 export const SCAN_LIMIT_GUIDANCE =
   "Re-run with smaller or selective output if the omitted content is needed. The session can continue; do not clear the redact-secrets catalog or key files."
@@ -18,6 +28,13 @@ const SCAN_WARNING_DURATION_MS = 12_000
 const FATAL_ERROR_DURATION_MS = 15_000
 
 const HOOKS = new Set([
+  "context",
+  "compaction",
+  "title",
+  "generate",
+  "http.request",
+  "experimental.ws.send",
+  "execute.before",
   "config",
   "experimental.chat.messages.transform",
   "experimental.chat.system.transform",
@@ -60,6 +77,9 @@ const PART_TYPES = new Set([
 const BUILTIN_TOOLS = new Set([
   "apply_patch",
   "bash",
+  "shell",
+  "execute",
+  "subagent",
   "edit",
   "glob",
   "grep",

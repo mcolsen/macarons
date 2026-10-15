@@ -1,35 +1,39 @@
-import {
-  appLogger,
-  reportServerCompat,
-  unsupportedVersionHooks,
-} from "@macarons/permission-rules"
-import type { Plugin } from "@opencode-ai/plugin"
-import { applyPromptRules, normalizeOptions, SERVICE } from "./shared"
+import { isIsolatedGeneration } from "@macarons/permission-rules"
+import { Plugin } from "@opencode/plugin"
+import type { SessionRequest } from "@opencode/plugin/promise/session"
+import { normalizeOptions, SERVICE } from "./shared"
 
-/** Provider/model-scoped system prompt transforms. */
-export const ScopedSystemPromptsPlugin: Plugin = async (
-  { client, directory, serverUrl },
-  rawOptions,
-) => {
-  const log = appLogger(client, SERVICE)
-  const compat = await reportServerCompat({
-    client,
-    serverUrl,
-    label: "Scoped system prompts",
-    service: SERVICE,
-    log,
-  })
-  if (compat?.disable)
-    return unsupportedVersionHooks(client, directory, compat.message)
+/** Apply rules to request-owned parts, preserving cache hints on untouched parts. */
+export const ScopedSystemPromptsPlugin = Plugin.define({
+  id: SERVICE,
+  async setup(ctx) {
+    const { rules, problems } = normalizeOptions(ctx.options)
+    for (const problem of problems)
+      console.warn(`${SERVICE}: ignoring invalid plugin option: ${problem}`)
+    if (rules.length === 0) return
 
-  const { rules, problems } = normalizeOptions(rawOptions)
-  for (const problem of problems)
-    log("warn", `ignoring invalid plugin option: ${problem}`)
-  if (rules.length === 0) return {}
+    const transform = (request: SessionRequest) => {
+      if (isIsolatedGeneration(ctx.location, request.sessionID)) return
+      for (const rule of rules) {
+        if (
+          rule.providerID !== request.model.providerID ||
+          rule.modelID !== request.model.id
+        )
+          continue
+        const content = rule.content.map((text) => ({
+          type: "text" as const,
+          text,
+        }))
+        if (rule.mode === "replace")
+          request.system.splice(0, request.system.length, ...content)
+        else if (rule.mode === "prepend") request.system.unshift(...content)
+        else request.system.push(...content)
+      }
+    }
+    // V2 has distinct hooks for the agent loop and auxiliary session requests.
+    for (const hook of ["context", "compaction", "title", "generate"] as const)
+      await ctx.session.hook(hook, transform)
+  },
+})
 
-  return {
-    "experimental.chat.system.transform": async ({ model }, output) => {
-      applyPromptRules(rules, model, output.system)
-    },
-  }
-}
+export default ScopedSystemPromptsPlugin

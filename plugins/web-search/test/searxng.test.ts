@@ -251,3 +251,14 @@ describe("searxngSearch against a live loopback instance", () => {
     expect(outcome.kind).toBe("error")
   })
 })
+
+test("SearXNG endpoints retain configured query parameters outside the search path", () => {
+  const url = new URL(
+    searxngRequestUrl("https://search.test/prefix/?token=configured", {
+      query: "q",
+    }),
+  )
+  expect(url.pathname).toBe("/prefix/search")
+  expect(url.searchParams.get("token")).toBe("configured")
+  expect(url.searchParams.get("q")).toBe("q")
+})

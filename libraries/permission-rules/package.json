@@ -1,7 +1,7 @@
 {
   "name": "@macarons/permission-rules",
   "version": "0.1.0",
-  "description": "OpenCode V1 permission-rule engine and common helpers shared by Macarons plugins: wildcard matching, last-rule-wins evaluation, store I/O, trust-boundary path containment, server locality, and supported-version gates",
+  "description": "Shared Macarons approval policy, trusted storage, filesystem locality, async and source-redaction helpers",
   "type": "module",
   "main": "./src/index.ts",
   "exports": {

@@ -13,9 +13,9 @@ updates:
         patterns:
           - "@opentui/*"
     ignore:
-      # The nightly ratchet updates these together with the CLI pin, supported
-      # version range, and release checksums.
-      - dependency-name: "@opencode-ai/*"
+      # The nightly ratchet updates these together with the CLI pin, npm artifact
+      # integrity manifest.
+      - dependency-name: "@opencode/*"
 
   - package-ecosystem: "github-actions"
     directory: "/"

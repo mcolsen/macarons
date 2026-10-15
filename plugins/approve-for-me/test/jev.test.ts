@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { registerSourceRedactor } from "@macarons/permission-rules"
 import { until } from "@macarons/plugin-test-harness"
-import { createClassifierPipeline } from "../src/server/classifier"
 import { jevRequest, parseJevVerdict } from "../src/server/jev"
 import {
   AUTHORIZATION_LEVELS,
@@ -12,11 +11,11 @@ import {
   enforcedDecision,
   RISK_LEVELS,
 } from "../src/shared"
+import { classifierHarness } from "./classifier-harness"
 import liveSmoke from "./fixtures/jev-live-smoke.json"
 
 const scope = {
   directory: "/test/jev-classifier",
-  serverUrl: "http://jev-classifier.test",
 }
 const request: ClassifierRequest = {
   permission: "bash",
@@ -73,24 +72,19 @@ function harness(
 ) {
   process.env.TYPESAFE_API_KEY = "test-jev-credential"
   const calls: { url: string; init: RequestInit }[] = []
-  const logs: string[] = []
   const hostCalls: string[] = []
   globalThis.fetch = (async (url: unknown, init: RequestInit) => {
     calls.push({ url: String(url), init })
     return respond(init)
   }) as typeof fetch
-  const pipeline = createClassifierPipeline({
-    ...scope,
-    classifierSessions: new Set(),
-    isolatedClassifierSessions: new Set(),
-    textOfParts: () => "",
-    log: (_level, message) => logs.push(message),
-    api: async (_method, pathname) => {
-      hostCalls.push(pathname)
+  const pipeline = classifierHarness({
+    directory: scope.directory,
+    onCall: (call) => {
+      hostCalls.push(call)
       throw new Error("Jev must not use host sessions")
     },
   })
-  return { ...pipeline, calls, logs, hostCalls }
+  return { ...pipeline, calls, logs: pipeline.logs, hostCalls }
 }
 
 describe("Jev adapter", () => {
@@ -234,9 +228,7 @@ describe("Jev adapter", () => {
 
   test("uses the connected TypeSafe key and observes logout on the next request", async () => {
     const api = harness()
-    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
-      typesafe: { type: "api", key: "connected-typesafe-key" },
-    })
+    api.setConnectedKey("connected-typesafe-key")
     const signal = new AbortController().signal
     expect(
       (await api.classify(request, judge, 1_000, signal)).verdict,
@@ -248,7 +240,7 @@ describe("Jev adapter", () => {
     expect(init.body as string).not.toContain("connected-typesafe-key")
     expect(api.logs.join()).not.toContain("connected-typesafe-key")
 
-    process.env.OPENCODE_AUTH_CONTENT = "{}"
+    api.setConnectedKey(undefined)
     delete process.env.TYPESAFE_API_KEY
     const result = await api.classify(request, judge, 1_000, signal)
     expect(result.verdict).toBeUndefined()

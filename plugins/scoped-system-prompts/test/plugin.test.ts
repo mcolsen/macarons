@@ -1,165 +1,99 @@
-import { describe, expect, test } from "bun:test"
-import { BAND_SAMPLE_VERSIONS as BAND } from "@macarons/permission-rules"
-import { ScopedSystemPromptsPlugin } from "../src/index"
+import { describe, expect, spyOn, test } from "bun:test"
+import type { Plugin } from "@opencode/plugin"
+import type { SessionRequest } from "@opencode/plugin/promise/session"
+import plugin from "../src/index"
 
-type Hooks = Awaited<ReturnType<typeof ScopedSystemPromptsPlugin>>
-
-function makeClient(version: unknown = BAND.floor) {
-  const logs: Array<{ body?: { message?: string } }> = []
-  const toasts: unknown[] = []
-  const client = {
-    app: {
-      log(input: { body?: { message?: string } }) {
-        logs.push(input)
-        return Promise.resolve({ data: true })
-      },
-    },
-    global: {
-      health: () => Promise.resolve({ data: { healthy: true, version } }),
-    },
-    tui: {
-      showToast(input: unknown) {
-        toasts.push(input)
-        return Promise.resolve({ data: true })
-      },
-    },
-  }
-  return { client, logs, toasts }
-}
-
-async function load(
-  options: Record<string, unknown> | undefined,
-  version: unknown = BAND.floor,
-) {
-  const host = makeClient(version)
-  const hooks = await ScopedSystemPromptsPlugin(
-    {
-      client: host.client as any,
-      directory: "/project",
-      worktree: "/project",
-      project: { id: "project" } as any,
-      serverUrl: new URL("http://opencode.internal"),
-      experimental_workspace: { register() {} } as any,
-      $: {} as any,
-    },
+async function load(options: Record<string, unknown> = {}) {
+  const hooks = new Map<string, (request: SessionRequest) => void>()
+  await plugin.setup({
     options,
-  )
-  return { ...host, hooks }
-}
-
-async function transform(
-  hooks: Hooks,
-  system: string[],
-  providerID: string,
-  id: string,
-  apiID = id,
-): Promise<void> {
-  await hooks["experimental.chat.system.transform"]?.(
-    {
-      model: {
-        providerID,
-        id,
-        api: { id: apiID },
-      } as any,
-    },
-    { system },
-  )
-}
-
-describe("system prompt hook", () => {
-  test("matches the selectable model id rather than the backing API id", async () => {
-    const { hooks } = await load({
-      prompts: [
-        {
-          model: "openai/my-sol-alias",
-          mode: "append",
-          content: "model-scoped instruction",
-        },
-      ],
-    })
-    const system = ["base"]
-
-    await transform(hooks, system, "openai", "my-sol-alias", "gpt-5.6-sol")
-
-    expect(system).toEqual(["base", "model-scoped instruction"])
-  })
-
-  test("leaves nonmatching requests unchanged", async () => {
-    const { hooks } = await load({
-      prompts: [
-        {
-          model: "openai/gpt-5.6-sol",
-          mode: "replace",
-          content: "replacement",
-        },
-      ],
-    })
-    const system = ["base", "project"]
-
-    await transform(hooks, system, "openai", "gpt-5.6-terra")
-
-    expect(system).toEqual(["base", "project"])
-  })
-
-  test("applies without a session id, including hidden generation calls", async () => {
-    const { hooks } = await load({
-      prompts: [
-        {
-          model: "openai/gpt-5.6-sol",
-          mode: "prepend",
-          content: "first",
-        },
-      ],
-    })
-    const system = ["base"]
-
-    await transform(hooks, system, "openai", "gpt-5.6-sol")
-
-    expect(system).toEqual(["first", "base"])
-  })
-
-  test("logs invalid rules once at startup and keeps valid rules active", async () => {
-    const { hooks, logs } = await load({
-      prompts: [
-        { model: "bad", mode: "append", content: "ignored" },
-        {
-          model: "openai/gpt-5.6-sol",
-          mode: "append",
-          content: "active",
-        },
-      ],
-    })
-    const system = ["base"]
-
-    await transform(hooks, system, "openai", "gpt-5.6-sol")
-
-    expect(system).toEqual(["base", "active"])
-    expect(logs).toHaveLength(1)
-    expect(logs[0]?.body?.message).toContain("ignoring invalid plugin option")
-  })
-
-  test("stays inert when no valid rules are configured", async () => {
-    const { hooks } = await load(undefined)
-    expect(hooks["experimental.chat.system.transform"]).toBeUndefined()
-  })
-
-  test("disables on an incompatible host major", async () => {
-    const { hooks, logs } = await load(
-      {
-        prompts: [
-          {
-            model: "openai/gpt-5.6-sol",
-            mode: "append",
-            content: "never applied",
-          },
-        ],
+    location: { directory: "/fixture" },
+    session: {
+      hook: async (name: string, fn: (request: SessionRequest) => void) => {
+        hooks.set(name, fn)
       },
-      BAND.incompatible,
-    )
+    },
+  } as unknown as Plugin.Context)
+  return hooks
+}
 
-    expect(hooks["experimental.chat.system.transform"]).toBeUndefined()
-    expect(
-      logs.some((entry) => entry.body?.message?.includes("is disabled")),
-    ).toBe(true)
+function request(providerID = "openai", id = "my-alias"): SessionRequest {
+  return {
+    sessionID: "session" as SessionRequest["sessionID"],
+    model: { providerID, id } as SessionRequest["model"],
+    system: [{ type: "text", text: "base", metadata: { retained: true } }],
+    messages: [],
+    options: {},
+  }
+}
+
+describe("v2 scoped system prompts", () => {
+  test("applies ordered rules to every request kind and preserves untouched part metadata", async () => {
+    const hooks = await load({
+      prompts: [
+        { model: "openai/my-alias", mode: "prepend", content: "first" },
+        {
+          model: "openai/my-alias",
+          mode: "append",
+          content: ["last", "last again"],
+        },
+      ],
+    })
+    expect([...hooks.keys()]).toEqual([
+      "context",
+      "compaction",
+      "title",
+      "generate",
+    ])
+    for (const transform of hooks.values()) {
+      const event = request()
+      const original = event.system[0]
+      transform(event)
+      expect(event.system.map((part) => part.text)).toEqual([
+        "first",
+        "base",
+        "last",
+        "last again",
+      ])
+      expect(event.system[1]).toBe(original)
+    }
+  })
+  test("matches exact selectable provider/model and replaces when configured", async () => {
+    const hooks = await load({
+      prompts: [
+        { model: "openai/my-alias", mode: "replace", content: "replacement" },
+      ],
+    })
+    for (const [provider, model] of [
+      ["other", "my-alias"],
+      ["openai", "backing-model"],
+    ]) {
+      const event = request(provider, model)
+      hooks.get("context")?.(event)
+      expect(event.system[0]?.text).toBe("base")
+    }
+    const event = request()
+    hooks.get("context")?.(event)
+    expect(event.system).toEqual([{ type: "text", text: "replacement" }])
+  })
+  test("warns for invalid rules and leaves valid rules active", async () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      const hooks = await load({
+        prompts: [
+          { model: "bad", mode: "append", content: "ignored" },
+          { model: "openai/my-alias", mode: "append", content: "active" },
+        ],
+      })
+      expect(warn).toHaveBeenCalledTimes(1)
+      const event = request()
+      hooks.get("context")?.(event)
+      expect(event.system.at(-1)?.text).toBe("active")
+    } finally {
+      warn.mockRestore()
+    }
+  })
+  test("registers nothing without valid rules", async () => {
+    expect((await load()).size).toBe(0)
   })
 })

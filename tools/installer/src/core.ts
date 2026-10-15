@@ -50,56 +50,12 @@ export type PluginInfo = {
 /** Which of the host's two plugin systems a config file feeds. */
 export type ConfigKind = "server" | "tui"
 
-// ── How OpenCode assembles the active plugin set (user level) ────────────────
-//
-// Rules transcribed from the pinned host source, 1.18.x line. The
-// "config-source rules" test in test/core.test.ts fails whenever
-// `.opencode-version` moves to a new minor line, forcing this block and the
-// code that encodes it to be re-verified against the new source together.
-//
-//  1. Global scope: `OPENCODE_CONFIG_DIR` *replaces* the default
-//     `$XDG_CONFIG_HOME/opencode` / `~/.config/opencode` directory entirely
-//     (`Global.Path.config = Flag.OPENCODE_CONFIG_DIR ?? Path.config`,
-//     packages/core/src/global.ts:64). The default dir is never read when the
-//     flag is set.
-//  2. Inside the global dir, `config.json` < `opencode.json` <
-//     `opencode.jsonc` are collapsed replace-wins (remeda mergeDeep,
-//     config.ts:246-260): arrays REPLACE, so the effective `plugin` array is
-//     that of the highest file that defines the key, and a higher file that
-//     omits it inherits the lower one's array. The collapsed result enters
-//     the plugin origins as ONE source.
-//  3. Plugin origins CONCAT across scopes (mergePluginOrigins /
-//     deduplicatePluginOrigins, config.ts:330-354). For every config dir that
-//     ends with ".opencode" or IS `OPENCODE_CONFIG_DIR`, `opencode.json` AND
-//     `opencode.jsonc` are each loaded as separate, unconditionally active
-//     origins (config.ts:424-430) — on top of the collapse when that dir is
-//     also the global one. Home `~/.opencode` is such a dir in every mode
-//     (config/paths.ts:23-41).
-//  4. TUI: `tui.json` AND `tui.jsonc` both load per directory — the global
-//     dir plus every ".opencode"/`OPENCODE_CONFIG_DIR` dir — and their
-//     plugin origins all concat (config/paths.ts:43-45, tui.ts:184-207).
-//
-// Out of the wizard's model (it is a user-level tool): project `.opencode`
-// dirs between a project cwd and its worktree root, `OPENCODE_CONFIG`,
-// `OPENCODE_CONFIG_CONTENT`, `OPENCODE_TUI_CONFIG`, and remote well-known
-// configs. The CLI warns when the env flags are set.
-//
-// Consequences encoded below:
-//  - INSTALL (`installTarget`) writes the file whose entry actually takes
-//    effect: the highest collapse file already defining `plugin` — writing a
-//    new `plugin` key into a higher file would mask a lower file's array —
-//    else the first-existing of opencode.jsonc/opencode.json/config.json
-//    (the order OpenCode's own config writer uses), else a fresh
-//    opencode.jsonc. TUI installs go to tui.json, or tui.jsonc when that is
-//    the only TUI file kept — any TUI file works, they all concat.
-//  - UNINSTALL (`buildPlan`) sweeps EVERY inventoried file: entries in a
-//    lower collapse file are active whenever the higher files omit the key,
-//    custom-dir and `.opencode` json/jsonc entries are active regardless,
-//    and even a currently-masked entry is one unrelated config edit away
-//    from loading again.
-
+// Verified against OpenCode v2.0.29: core/config/discovery.ts loads both
+// opencode.json and opencode.jsonc as independent documents; config/plugin/source.ts
+// concatenates their plugin operations. CLI config/config.ts reads only cli.json.
+// Legacy files remain in the inventory solely to migrate/remove Macarons entries.
 const OPENCODE_CONFIG_SCHEMA = "https://opencode.ai/config.json"
-const OPENCODE_TUI_SCHEMA = "https://opencode.ai/tui.json"
+const OPENCODE_TUI_SCHEMA = "https://opencode.ai/v2/cli.json"
 
 /** Which user-level location a config file belongs to. */
 export type SourceScope = "config-dir" | "home-opencode"
@@ -107,16 +63,11 @@ export type SourceScope = "config-dir" | "home-opencode"
 /** One config file the host reads plugin entries from, and how it activates them. */
 export type ConfigSource = {
   kind: ConfigKind
-  /** Absolute path; the file may not exist yet. */
   file: string
   scope: SourceScope
-  /**
-   * Position in the global dir's replace-wins collapse (higher wins);
-   * undefined for files outside the collapse. Only the highest existing
-   * collapse file that defines a `plugin` key contributes its array.
-   */
-  collapseRank?: number
-  /** Concat-merged as an independent origin: its entries are active unconditionally. */
+  /** The v2 field is plugins; legacy files retain plugin during cleanup. */
+  pluginKey?: "plugin" | "plugins"
+  /** True only for a source loaded unconditionally by the v2 host. */
   origin: boolean
 }
 
@@ -146,68 +97,58 @@ export function discoverConfigSources(options: {
   const configDir = override || resolveConfigDir(options.env, options.homedir)
   const custom = Boolean(override || options.env.OPENCODE_CONFIG_DIR?.trim())
 
-  // The host's own predicate for "this dir's opencode.json/.jsonc are each an
-  // independent origin" is `dir === OPENCODE_CONFIG_DIR || dir.endsWith(".opencode")`
-  // (config.ts:424-430) — a string test, not a mode test — so mirror it.
-  const globalPairIsOrigin = custom || configDir.endsWith(".opencode")
-
   const sources: ConfigSource[] = [
     {
       kind: "server",
       file: path.join(configDir, "config.json"),
       scope: "config-dir",
-      collapseRank: 0,
+      pluginKey: "plugin",
       origin: false,
     },
-    {
-      kind: "server",
-      file: path.join(configDir, "opencode.json"),
-      scope: "config-dir",
-      collapseRank: 1,
-      origin: globalPairIsOrigin,
-    },
-    {
-      kind: "server",
-      file: path.join(configDir, "opencode.jsonc"),
-      scope: "config-dir",
-      collapseRank: 2,
-      origin: globalPairIsOrigin,
-    },
+    ...["opencode.json", "opencode.jsonc"].map(
+      (base): ConfigSource => ({
+        kind: "server",
+        file: path.join(configDir, base),
+        scope: "config-dir",
+        pluginKey: "plugins",
+        origin: true,
+      }),
+    ),
     {
       kind: "tui",
-      file: path.join(configDir, "tui.json"),
+      file: path.join(configDir, "cli.json"),
       scope: "config-dir",
+      pluginKey: "plugins",
       origin: true,
     },
-    {
-      kind: "tui",
-      file: path.join(configDir, "tui.jsonc"),
-      scope: "config-dir",
-      origin: true,
-    },
+    ...["tui.json", "tui.jsonc"].map(
+      (base): ConfigSource => ({
+        kind: "tui",
+        file: path.join(configDir, base),
+        scope: "config-dir",
+        pluginKey: "plugin",
+        origin: false,
+      }),
+    ),
   ]
-
-  // Home ~/.opencode is a further active origin dir in every mode; when the
-  // global dir IS ~/.opencode (OPENCODE_CONFIG_DIR pointed there) its files
-  // are already inventoried above.
   const homeOpencode = path.join(options.homedir, ".opencode")
-  if (path.resolve(homeOpencode) === path.resolve(configDir)) {
+  if (path.resolve(homeOpencode) === path.resolve(configDir))
     return { configDir, custom, sources }
-  }
-  for (const base of ["opencode.json", "opencode.jsonc"]) {
+  // Home .opencode is now a project-ancestor source, not an unconditional
+  // global source. Migrate entries out of it regardless of the current cwd.
+  for (const base of [
+    "opencode.json",
+    "opencode.jsonc",
+    "tui.json",
+    "tui.jsonc",
+  ]) {
+    const server = base.startsWith("opencode")
     sources.push({
-      kind: "server",
+      kind: server ? "server" : "tui",
       file: path.join(homeOpencode, base),
       scope: "home-opencode",
-      origin: true,
-    })
-  }
-  for (const base of ["tui.json", "tui.jsonc"]) {
-    sources.push({
-      kind: "tui",
-      file: path.join(homeOpencode, base),
-      scope: "home-opencode",
-      origin: true,
+      pluginKey: server ? "plugins" : "plugin",
+      origin: false,
     })
   }
   return { configDir, custom, homeOpencodeDir: homeOpencode, sources }
@@ -215,12 +156,12 @@ export function discoverConfigSources(options: {
 
 /** The canonical `plugin` entry for a plugin's server half, or undefined if it has none. */
 export function serverEntryUrl(plugin: PluginInfo): string | undefined {
-  return plugin.serverEntry ? pathToFileURL(plugin.serverEntry).href : undefined
+  return plugin.serverEntry ? pathToFileURL(plugin.dir).href : undefined
 }
 
 /** The canonical `plugin` entry for a plugin's TUI half, or undefined if it has none. */
 export function tuiEntryUrl(plugin: PluginInfo): string | undefined {
-  return plugin.tuiEntry ? pathToFileURL(plugin.tuiEntry).href : undefined
+  return plugin.tuiEntry ? pathToFileURL(plugin.dir).href : undefined
 }
 
 /**
@@ -232,6 +173,24 @@ export function tuiEntryUrl(plugin: PluginInfo): string | undefined {
  * entry whose file is missing on disk: offering the surviving half would
  * turn a broken dual-half package into a silent partial install.
  */
+export const RETIRED_PLUGIN_IDS = [
+  "background-tasks",
+  "subagent-comms",
+  "subagents-sidebar",
+  "btw",
+  "persist-permissions",
+] as const
+
+/** Retained identities let upgrades remove entries after their source is retired. */
+export function retiredPlugins(repoRoot: string): PluginInfo[] {
+  return RETIRED_PLUGIN_IDS.map((id) => ({
+    name: `@macarons/${id}`,
+    id,
+    description: "Replaced by OpenCode v2",
+    dir: path.join(repoRoot, "plugins", id),
+  }))
+}
+
 export async function discoverPlugins(repoRoot: string): Promise<PluginInfo[]> {
   const pluginsDir = path.join(repoRoot, "plugins")
   let entries: string[]
@@ -245,6 +204,7 @@ export async function discoverPlugins(repoRoot: string): Promise<PluginInfo[]> {
 
   const plugins: PluginInfo[] = []
   for (const name of entries) {
+    if (RETIRED_PLUGIN_IDS.some((id) => id === name)) continue
     const dir = path.join(pluginsDir, name)
     const pkg = await readPackageJson(path.join(dir, "package.json"))
     if (!pkg || typeof pkg.name !== "string") continue
@@ -322,6 +282,8 @@ export type SourceDoc = {
   exists: boolean
   /** Whether the document defines a `plugin` key at all — this drives collapse inheritance. */
   hasPluginKey: boolean
+  /** Legacy plugin entries retained beside the native plugins field. */
+  legacyList?: unknown[]
   /** The `plugin` array, normalized to an array (empty when the file/key is absent). */
   list: unknown[]
 }
@@ -384,11 +346,19 @@ export async function readSourceDoc(source: ConfigSource): Promise<SourceDoc> {
       `${source.file} is not a JSON object; refusing to modify it`,
     )
   }
-  const raw = (parsed as Record<string, unknown>).plugin
-  if (raw !== undefined && !Array.isArray(raw)) {
-    throw new Error(
-      `${source.file} has a "plugin" field that is not an array; refusing to modify it`,
-    )
+  const key = source.pluginKey ?? "plugin"
+  const raw = (parsed as Record<string, unknown>)[key]
+  const legacy =
+    key === "plugins" ? (parsed as Record<string, unknown>).plugin : undefined
+  for (const [field, value] of [
+    [key, raw],
+    ["plugin", legacy],
+  ] as const) {
+    if (value !== undefined && !Array.isArray(value)) {
+      throw new Error(
+        `${source.file} has a "${field}" field that is not an array; refusing to modify it`,
+      )
+    }
   }
   return {
     source,
@@ -396,6 +366,7 @@ export async function readSourceDoc(source: ConfigSource): Promise<SourceDoc> {
     exists: true,
     hasPluginKey: raw !== undefined,
     list: Array.isArray(raw) ? [...raw] : [],
+    ...(Array.isArray(legacy) ? { legacyList: [...legacy] } : {}),
   }
 }
 
@@ -450,6 +421,13 @@ export async function assertSourceDocsUnchanged(
 export function entrySpec(entry: unknown): string | undefined {
   if (typeof entry === "string") return entry
   if (Array.isArray(entry) && typeof entry[0] === "string") return entry[0]
+  if (
+    entry &&
+    typeof entry === "object" &&
+    "package" in entry &&
+    typeof entry.package === "string"
+  )
+    return entry.package
   return undefined
 }
 
@@ -589,29 +567,25 @@ export function entryMatchesPlugin(
 /** One active `plugin` entry together with the doc that declares it. */
 export type ActiveEntry = { entry: unknown; doc: SourceDoc }
 
-/**
- * The entries the host would actually load for one kind, each paired with its
- * declaring doc, mirroring the merge rules documented above: the collapse
- * contributes the array of the highest file that defines a `plugin` key, and
- * every origin file's array is concatenated on top unconditionally. The doc
- * matters because the host resolves `./relative` specs against the declaring
- * file before merging.
- */
+/** Native v2 plugin operations from active documents, in source order. */
 export function activeEntryOrigins(
   docs: SourceDoc[],
   kind: ConfigKind,
 ): ActiveEntry[] {
-  const relevant = docs.filter((doc) => doc.source.kind === kind)
-  const collapse = relevant
-    .filter((doc) => doc.source.collapseRank !== undefined)
-    .sort((a, b) => (a.source.collapseRank ?? 0) - (b.source.collapseRank ?? 0))
-  const winner = collapse.filter((doc) => doc.hasPluginKey).at(-1)
-  const active: ActiveEntry[] = winner
-    ? winner.list.map((entry) => ({ entry, doc: winner }))
-    : []
-  for (const doc of relevant) {
-    if (doc.source.origin && doc !== winner)
-      active.push(...doc.list.map((entry) => ({ entry, doc })))
+  const active: ActiveEntry[] = []
+  for (const doc of docs) {
+    if (doc.source.kind !== kind || !doc.source.origin) continue
+    for (const entry of doc.list) {
+      const spec = entrySpec(entry)
+      if (typeof entry === "string" && entry.startsWith("-")) {
+        for (let index = active.length - 1; index >= 0; index--) {
+          if (entrySpec(active[index]?.entry) === entry.slice(1))
+            active.splice(index, 1)
+        }
+        continue
+      }
+      if (spec) active.push({ entry, doc })
+    }
   }
   return active
 }
@@ -637,7 +611,7 @@ export function pluginState(docs: SourceDoc[], plugin: PluginInfo) {
   const tui = matches("tui")
   const files = docs
     .filter((doc) =>
-      doc.list.some((entry) =>
+      [...doc.list, ...(doc.legacyList ?? [])].some((entry) =>
         entryMatchesPlugin(entry, plugin, doc.source.file),
       ),
     )
@@ -651,35 +625,21 @@ export function pluginState(docs: SourceDoc[], plugin: PluginInfo) {
   }
 }
 
-/**
- * The config-dir file an install writes so the new entry actually takes
- * effect. Server: the highest collapse file that already defines `plugin`
- * (writing a new key into a higher file would mask the defining file's
- * array), else the first-existing of opencode.jsonc/opencode.json/config.json,
- * else a fresh opencode.jsonc. TUI files all concat, so: tui.json, or
- * tui.jsonc when it is the only TUI file kept.
- */
+/** Prefer an existing active server document; CLI plugins always use cli.json. */
 export function installTarget(docs: SourceDoc[], kind: ConfigKind): SourceDoc {
-  const dir = docs.filter(
-    (doc) => doc.source.kind === kind && doc.source.scope === "config-dir",
+  const candidates = docs.filter(
+    (doc) =>
+      doc.source.kind === kind &&
+      doc.source.scope === "config-dir" &&
+      doc.source.origin,
   )
-  if (kind === "tui") {
-    const fallback = dir[0]
-    if (fallback === undefined)
-      throw new Error("no config-dir tui source to install into")
-    return dir.find((doc) => doc.exists) ?? fallback
-  }
-  const byRankDesc = [...dir].sort(
-    (a, b) => (b.source.collapseRank ?? 0) - (a.source.collapseRank ?? 0),
-  )
-  const fallback = byRankDesc[0]
-  if (fallback === undefined)
-    throw new Error("no config-dir server source to install into")
-  return (
-    byRankDesc.find((doc) => doc.exists && doc.hasPluginKey) ??
-    byRankDesc.find((doc) => doc.exists) ??
-    fallback
-  )
+  const target =
+    kind === "tui"
+      ? candidates.find((doc) => path.basename(doc.source.file) === "cli.json")
+      : ([...candidates].reverse().find((doc) => doc.exists) ??
+        candidates.at(-1))
+  if (!target) throw new Error(`no config-dir ${kind} source to install into`)
+  return target
 }
 
 /** What a plan does to one plugin in one half. */
@@ -693,7 +653,12 @@ export type PluginPlan = {
 }
 
 /** One file's rewrite under a plan. `doc` is the original, unmutated doc. */
-export type DocEdit = { doc: SourceDoc; list: unknown[]; changed: boolean }
+export type DocEdit = {
+  doc: SourceDoc
+  list: unknown[]
+  legacyList?: unknown[]
+  changed: boolean
+}
 
 /** The full set of config edits a selection implies, ready to write. */
 export type Plan = {
@@ -704,25 +669,16 @@ export type Plan = {
 
 /**
  * Install-time options to attach to a plugin's newly-added server entry, keyed
- * by plugin name. A plugin present in the map gets a `[spec, options]` tuple
+ * by plugin name. A plugin present in the map gets a `{ package, options }` entry
  * instead of a bare string spec — the same form the web-search README documents.
  * Only consulted when no saved server entry exists, so active and masked
  * installs retain their existing options (see the install flow in cli.ts).
  */
 export type PluginOptions = Map<string, Record<string, unknown> | undefined>
 
-/**
- * Compute the config edits that make the inventory reflect `selection`
- * (plugin name → wanted). Ticking a plugin ensures each half it ships is
- * ACTIVE — repairing a half-install or a masked entry by writing the install
- * target — while entries elsewhere are left alone. Unticking removes every
- * entry that references the plugin from EVERY inventoried file, so no active
- * (or maskedly latent) origin survives. The input docs are not mutated.
- *
- * `options` carries install-time configuration for freshly-added server
- * entries without a saved declaration. Masked entries retain their complete
- * tuples; conflicting saved declarations throw before a plan can be written.
- * A fresh install without options uses a bare string spec.
+/** Migrate selected Macarons entries to native package-directory declarations;
+ * remove deselected identities from every inventoried native or legacy array.
+ * Conflicting saved options fail before writing. Unrelated entries are retained.
  */
 export function buildPlan(
   plugins: PluginInfo[],
@@ -771,7 +727,9 @@ export function buildPlan(
     return {
       doc: original,
       list: doc.list,
-      changed: doc.list !== original.list,
+      legacyList: doc.legacyList,
+      changed:
+        doc.list !== original.list || doc.legacyList !== original.legacyList,
     }
   })
   return { edits, perPlugin, changed: edits.some((edit) => edit.changed) }
@@ -784,111 +742,96 @@ function applyDesired(
   want: boolean,
   options?: Record<string, unknown>,
 ): EntryChange {
-  if (!want) {
-    // Sweep every file of this kind — a masked entry is as much an uninstall
-    // target as an active one. A file swept down to nothing keeps an explicit
-    // `plugin: []` (as the host's own writer does) rather than dropping the
-    // key: deleting it would change the collapse winner and could unmask —
-    // silently activate — entries a lower file still lists.
-    let removed = false
-    for (const doc of working) {
-      if (doc.source.kind !== kind) continue
-      const kept = doc.list.filter(
-        (entry) => !entryMatchesPlugin(entry, plugin, doc.source.file),
-      )
-      if (kept.length === doc.list.length) continue
-      doc.list = kept
-      removed = true
-    }
-    return removed ? "removed" : "none"
-  }
   const url = kind === "server" ? serverEntryUrl(plugin) : tuiEntryUrl(plugin)
-  // When a previous name is present, move every legacy and current
-  // declaration for that half to one checkout URL before testing activation.
-  // Keeping either package identity beside the migrated URL could load the
-  // plugin twice; preserving whole tuples and their order leaves conflicting
-  // plugin-owned options to the host's normal last-origin precedence.
-  let migrated = false
-  if (url) {
-    const isLegacyEntry = (entry: unknown, doc: SourceDoc) =>
-      entryMatchesLegacyPackage(entry, plugin) ||
-      entryMatchesRenamedPlugin(entry, plugin, doc.source.file) ||
-      (kind === "tui" &&
-        entryMatchesLegacyCodexLimits(entry, plugin, doc.source.file))
-    const hasLegacyEntry = working.some(
-      (doc) =>
-        doc.source.kind === kind &&
-        doc.list.some((entry) => isLegacyEntry(entry, doc)),
-    )
-    if (hasLegacyEntry) {
-      migrated = true
-      for (const doc of working) {
-        if (doc.source.kind !== kind) continue
-        let changed = false
-        const canonical = doc.list.map((entry) => {
-          if (
-            !isLegacyEntry(entry, doc) &&
-            !entryMatchesCurrentPlugin(entry, plugin, doc.source.file)
-          )
-            return entry
-          if (entrySpec(entry) === url) return entry
-          changed = true
-          return Array.isArray(entry) ? [url, ...entry.slice(1)] : url
-        })
-        // Keep cross-document duplicates as latent fallbacks; OpenCode dedupes
-        // active origins. Only identical entries in this physical array fold.
-        const list = canonical.filter((entry, index) => {
-          if (entrySpec(entry) !== url) return true
-          return !canonical
-            .slice(index + 1)
-            .some((later) => isDeepStrictEqual(entry, later))
-        })
-        if (list.length !== canonical.length) changed = true
-        if (changed) doc.list = list
-      }
-    }
+  const matches = (entry: unknown, doc: SourceDoc) => {
+    const disabled = typeof entry === "string" && entry.startsWith("-")
+    const spec = disabled ? entry.slice(1) : entry
+    if (disabled && (spec === plugin.id || spec === `macarons.${plugin.id}`))
+      return true
+    return entryMatchesPlugin(spec, plugin, doc.source.file)
   }
-  if (
-    activeEntryOrigins(working, kind).some(({ entry, doc }) =>
-      entryMatchesPlugin(entry, plugin, doc.source.file),
-    )
-  )
-    return migrated ? "added" : "none"
-  // A plugin with no half of this kind cannot get an entry; that is not a change.
-  if (!url) return "unavailable"
 
-  // Only server entries can be masked; TUI origins are always active above.
-  // Every matching entry is masked here. Carry its full tuple forward rather
-  // than reset plugin-owned settings; refuse ambiguity instead of guessing
-  // which saved privacy options to discard. Normalize only the plugin spec.
   const saved = working
     .filter((doc) => doc.source.kind === kind)
     .flatMap((doc) =>
-      doc.list
-        .filter((entry) => entryMatchesPlugin(entry, plugin, doc.source.file))
-        .map((entry) => ({
-          entry: Array.isArray(entry) ? [url, ...entry.slice(1)] : url,
-          file: doc.source.file,
-        })),
+      [...doc.list, ...(doc.legacyList ?? [])]
+        .filter(
+          (entry) =>
+            matches(entry, doc) &&
+            !(typeof entry === "string" && entry.startsWith("-")),
+        )
+        .map((entry) => {
+          const savedOptions = Array.isArray(entry)
+            ? entry[1]
+            : entry && typeof entry === "object" && "options" in entry
+              ? entry.options
+              : undefined
+          return {
+            entry:
+              savedOptions === undefined
+                ? url
+                : { package: url, options: savedOptions },
+            file: doc.source.file,
+          }
+        }),
     )
-  const savedEntry = saved[0]?.entry
-  if (saved.some(({ entry }) => !isDeepStrictEqual(entry, savedEntry))) {
-    const files = [...new Set(saved.map(({ file }) => file))].join(", ")
+  if (
+    want &&
+    url &&
+    saved.some(({ entry }) => !isDeepStrictEqual(entry, saved[0]?.entry))
+  ) {
     throw new Error(
-      `Cannot repair ${plugin.id} (${kind}): conflicting masked declarations in ${files}. Keep only the intended configuration or make the declarations identical, then retry. Alternatively, rerun the wizard and untick ${plugin.id} to remove all of its entries instead; no files were changed.`,
+      `Cannot repair ${plugin.id} (${kind}): conflicting saved declarations in ${[...new Set(saved.map(({ file }) => file))].join(", ")}. Keep only the intended configuration or make the declarations identical, then retry. Alternatively, untick ${plugin.id} to remove its entries; no files were changed.`,
     )
   }
-  // Fresh options apply only to a new server declaration, never a saved entry
-  // or the TUI half. Empty fresh options still produce a bare spec.
   const entry =
-    savedEntry ??
+    saved[0]?.entry ??
     (kind === "server" && options && Object.keys(options).length
-      ? [url, options]
+      ? { package: url, options }
       : url)
-  const target = installTarget(working, kind)
-  target.list = [...target.list, entry]
-  target.hasPluginKey = true
-  return "added"
+  // Preserve an already canonical declaration in its existing active document.
+  const canonical = working.find(
+    (doc) =>
+      doc.source.kind === kind &&
+      doc.source.origin &&
+      doc.list.some((item) => isDeepStrictEqual(item, entry)),
+  )
+  const target =
+    want && url ? (canonical ?? installTarget(working, kind)) : undefined
+  let changed = false
+  let keptCanonical = false
+  for (const doc of working) {
+    if (doc.source.kind !== kind) continue
+    const keep = doc.list.filter((item) => {
+      if (!matches(item, doc)) return true
+      // Disable selectors may suppress plugins from unmanaged auto-discovery.
+      // Removing one on uninstall could reactivate what the user disabled.
+      if (!want && typeof item === "string" && item.startsWith("-")) return true
+      if (doc === target && !keptCanonical && isDeepStrictEqual(item, entry)) {
+        keptCanonical = true
+        return true
+      }
+      return false
+    })
+    if (keep.length !== doc.list.length) {
+      doc.list = keep
+      changed = true
+    }
+    if (doc.legacyList) {
+      const legacy = doc.legacyList.filter((item) => !matches(item, doc))
+      if (legacy.length !== doc.legacyList.length) {
+        doc.legacyList = legacy
+        changed = true
+      }
+    }
+  }
+  if (target && !keptCanonical) {
+    target.list = [...target.list, entry]
+    target.hasPluginKey = true
+    changed = true
+  }
+  if (changed) return want && url ? "added" : "removed"
+  return want && !url ? "unavailable" : "none"
 }
 
 /**
@@ -897,18 +840,34 @@ function applyDesired(
  * every other key exactly (the same mechanism OpenCode's own `mcp add` uses);
  * a new file is rendered as plain JSON with OpenCode's `$schema`.
  */
-export function renderPluginDoc(doc: SourceDoc, list: unknown[]): string {
+export function renderPluginDoc(
+  doc: SourceDoc,
+  list: unknown[],
+  legacyList = doc.legacyList,
+): string {
+  const key = doc.source.pluginKey ?? "plugin"
   if (doc.text.trim() === "") {
     const schema =
       doc.source.kind === "server"
         ? OPENCODE_CONFIG_SCHEMA
         : OPENCODE_TUI_SCHEMA
-    return `${JSON.stringify({ $schema: schema, plugin: list }, null, 2)}\n`
+    return `${JSON.stringify({ $schema: schema, [key]: list }, null, 2)}\n`
   }
-  const edits = modify(doc.text, ["plugin"], list, {
-    formattingOptions: { tabSize: 2, insertSpaces: true },
-  })
-  return applyEdits(doc.text, edits)
+  let output = applyEdits(
+    doc.text,
+    modify(doc.text, [key], list, {
+      formattingOptions: { tabSize: 2, insertSpaces: true },
+    }),
+  )
+  if (key === "plugins" && legacyList !== undefined) {
+    output = applyEdits(
+      output,
+      modify(output, ["plugin"], legacyList, {
+        formattingOptions: { tabSize: 2, insertSpaces: true },
+      }),
+    )
+  }
+  return output
 }
 
 /**
@@ -922,6 +881,7 @@ export function assertRenderedDoc(
   file: string,
   output: string,
   list: unknown[],
+  key: "plugin" | "plugins" = "plugin",
 ): void {
   const errors: ParseError[] = []
   const parsed = parse(output, errors, {
@@ -930,7 +890,7 @@ export function assertRenderedDoc(
   })
   const plugin =
     parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>).plugin
+      ? (parsed as Record<string, unknown>)[key]
       : undefined
   if (errors.length || JSON.stringify(plugin) !== JSON.stringify(list)) {
     throw new Error(
@@ -952,8 +912,20 @@ export function renderEdits(edits: DocEdit[]): RenderedEdit[] {
   return edits
     .filter((edit) => edit.changed)
     .map((edit) => {
-      const output = renderPluginDoc(edit.doc, edit.list)
-      assertRenderedDoc(edit.doc.source.file, output, edit.list)
+      const output = renderPluginDoc(edit.doc, edit.list, edit.legacyList)
+      assertRenderedDoc(
+        edit.doc.source.file,
+        output,
+        edit.list,
+        edit.doc.source.pluginKey,
+      )
+      if (edit.legacyList !== undefined)
+        assertRenderedDoc(
+          edit.doc.source.file,
+          output,
+          edit.legacyList,
+          "plugin",
+        )
       return { doc: edit.doc, output }
     })
 }

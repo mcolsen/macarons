@@ -23,16 +23,17 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@macarons/permission-rules": "workspace:*"
+    "@macarons/permission-rules": "workspace:*",
+    "@opencode/plugin": "2.0.29"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
     "@macarons/plugin-test-harness": "workspace:*",
-    "@opencode-ai/plugin": "1.18.14",
-    "@opencode-ai/sdk": "1.18.14",
     "@types/bun": "^1.4.2",
     "@types/node": "^26.6.2",
     "solid-js": "1.9.15",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "@opencode/client": "2.0.29",
+    "@opencode/theme": "2.0.29"
   }
 }

@@ -1,9 +1,14 @@
-import { describeBundle } from "@macarons/plugin-test-harness"
+import { expect, test } from "bun:test"
 
-// The bundle must inline the relative graph (./shared, ./engine/*) and the
-// vendored rule set — a copied single file cannot follow any of them.
-
-describeBundle({
-  testDir: import.meta.dir,
-  exportName: "RedactSecretsPlugin",
+test("bundles the vendored detector while leaving host SDK packages external", async () => {
+  const build = await Bun.build({
+    entrypoints: [new URL("../src/index.ts", import.meta.url).pathname],
+    target: "bun",
+    packages: "external",
+  })
+  expect(build.success).toBe(true)
+  const text = await build.outputs[0]?.text()
+  expect(text).toContain("macarons.redact-secrets")
+  expect(text).toContain("github-pat")
+  expect(text).not.toContain("@opencode-ai/plugin")
 })

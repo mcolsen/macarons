@@ -1,7 +1,7 @@
 {
   "name": "@macarons/codex-limits",
-  "version": "0.1.0",
-  "description": "OpenCode TUI plugin that shows Codex subscription usage windows and renewal times in the sidebar for the session and approve-for-me classifier",
+  "version": "0.2.0",
+  "description": "OpenCode v2 server-authenticated Codex subscription quota widget for sessions and approval classifiers",
   "type": "module",
   "main": "./src/index.ts",
   "exports": {
@@ -11,7 +11,9 @@
   },
   "files": [
     "LICENSE",
-    "src"
+    "src",
+    "server.ts",
+    "tui.ts"
   ],
   "scripts": {
     "build": "bun build src/index.ts --target=bun --outfile=dist/codex-limits.js",
@@ -20,7 +22,7 @@
     "typecheck": "tsc --noEmit"
   },
   "engines": {
-    "opencode": ">=1.17.14 <2.0.0"
+    "opencode": ">=2.0.29 <3.0.0"
   },
   "keywords": [
     "opencode",
@@ -31,20 +33,20 @@
   "license": "MIT",
   "dependencies": {
     "@macarons/permission-rules": "workspace:*",
-    "@macarons/approve-for-me": "workspace:*",
-    "@macarons/usage-limits": "workspace:*"
+    "@macarons/usage-limits": "workspace:*",
+    "@opencode/plugin": "2.0.29"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
     "@macarons/plugin-test-harness": "workspace:*",
-    "@opencode-ai/plugin": "1.18.14",
-    "@opencode-ai/sdk": "1.18.14",
-    "@opentui/core": "0.5.12",
-    "@opentui/keymap": "0.5.12",
-    "@opentui/solid": "0.5.12",
+    "@opentui/core": "0.5.17",
+    "@opentui/keymap": "0.5.17",
+    "@opentui/solid": "0.5.17",
     "@types/bun": "^1.4.2",
     "@types/node": "^26.6.2",
     "solid-js": "1.9.15",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "@opencode/client": "2.0.29",
+    "@opencode/theme": "2.0.29"
   }
 }

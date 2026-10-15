@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import path from "node:path"
 import ts from "@typescript/typescript6"
 
@@ -33,20 +33,8 @@ import ts from "@typescript/typescript6"
  * not cross-plugin imports.
  */
 
-const ALLOWED = [
-  {
-    importer: path.join("plugins", "codex-limits", "src", "tui.tsx"),
-    specifier: "@macarons/approve-for-me/interop",
-    reason:
-      "Codex limits show classifier usage; ./interop is approve-for-me's deliberate sibling API, answered by its own settings chain (issue #114)",
-  },
-  {
-    importer: path.join("plugins", "synthetic-limits", "src", "tui.tsx"),
-    specifier: "@macarons/approve-for-me/interop",
-    reason:
-      "Synthetic limits show classifier usage through the same reviewed approve-for-me interop surface",
-  },
-]
+const ALLOWED: Array<{ importer: string; specifier: string; reason: string }> =
+  []
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..", "..")
 
@@ -56,7 +44,13 @@ function gitLsFiles(...patterns: string[]): string[] {
   // masquerade as a top-level package.
   return execFileSync(
     "git",
-    ["ls-files", ...patterns.map((p) => `:(glob)${p}`)],
+    [
+      "ls-files",
+      "--cached",
+      "--others",
+      "--exclude-standard",
+      ...patterns.map((p) => `:(glob)${p}`),
+    ],
     {
       cwd: REPO_ROOT,
       encoding: "utf8",
@@ -64,7 +58,7 @@ function gitLsFiles(...patterns: string[]): string[] {
     },
   )
     .split("\n")
-    .filter(Boolean)
+    .filter((file) => file && existsSync(path.join(REPO_ROOT, file)))
 }
 
 function packageNameOf(specifier: string): string {
@@ -215,7 +209,7 @@ describe("cross-plugin imports are pinned to reviewed interop surfaces", () => {
     // ≥ the 12 plugins + 1 tool at the time of writing; shrinking is a loud,
     // deliberate roster change, not a broken walk. Every package must
     // contribute scanned sources — an empty scan must never pass vacuously.
-    expect(packages.length).toBeGreaterThanOrEqual(13)
+    expect(packages.length).toBeGreaterThanOrEqual(9)
     for (const { pkg, scanned } of scans)
       expect(
         scanned,
