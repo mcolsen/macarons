@@ -154,11 +154,11 @@ describe("pluginsToConfigure", () => {
 describe("buildWebsearchOptions", () => {
   test("all defaults (blank URL, both backends on) → undefined, so a bare string is written", () => {
     expect(
-      buildWebsearchOptions({ searxngUrl: "", native: true, exa: true }),
+      buildWebsearchOptions({ searxngUrl: "", native: true }),
     ).toBeUndefined()
     // Whitespace-only URL is still "no URL".
     expect(
-      buildWebsearchOptions({ searxngUrl: "   ", native: true, exa: true }),
+      buildWebsearchOptions({ searxngUrl: "   ", native: true }),
     ).toBeUndefined()
   })
 
@@ -167,18 +167,14 @@ describe("buildWebsearchOptions", () => {
       buildWebsearchOptions({
         searxngUrl: "  http://searxng.tailnet:8080  ",
         native: true,
-        exa: true,
       }),
     ).toEqual({ searxng: { url: "http://searxng.tailnet:8080" } })
   })
 
   test("disabling a backend writes only its explicit `enabled: false` opt-out", () => {
-    expect(
-      buildWebsearchOptions({ searxngUrl: "", native: false, exa: true }),
-    ).toEqual({ native: { enabled: false } })
-    expect(
-      buildWebsearchOptions({ searxngUrl: "", native: true, exa: false }),
-    ).toEqual({ exa: { enabled: false } })
+    expect(buildWebsearchOptions({ searxngUrl: "", native: false })).toEqual({
+      native: { enabled: false },
+    })
   })
 
   test("every non-default is combined into one options object", () => {
@@ -186,12 +182,10 @@ describe("buildWebsearchOptions", () => {
       buildWebsearchOptions({
         searxngUrl: "http://sx:8080",
         native: false,
-        exa: false,
       }),
     ).toEqual({
       searxng: { url: "http://sx:8080" },
       native: { enabled: false },
-      exa: { enabled: false },
     })
   })
 })
@@ -231,27 +225,25 @@ describe("promptYesNo", () => {
 })
 
 describe("promptWebsearchOptions", () => {
-  test("asks URL then native then exa, in that fixed order", async () => {
+  test("asks URL then native, in that fixed order", async () => {
     const { prompter, asked } = scriptedPrompter(["", "", ""])
     await promptWebsearchOptions(prompter)
-    expect(asked).toHaveLength(3)
+    expect(asked).toHaveLength(2)
     expect(asked[0]).toMatch(/SearXNG/i)
     expect(asked[1]).toMatch(/native/i)
-    expect(asked[2]).toMatch(/Exa/i)
   })
 
-  test("URL set, both toggles left at their default → just the searxng URL", async () => {
+  test("URL set, provider search left at its default → just the searxng URL", async () => {
     const { prompter } = scriptedPrompter(["http://sx:8080", "", ""])
     expect(await promptWebsearchOptions(prompter)).toEqual({
       searxng: { url: "http://sx:8080" },
     })
   })
 
-  test("declining both backends with no URL → the two opt-outs only", async () => {
+  test("declining provider search without a URL writes its opt-out", async () => {
     const { prompter } = scriptedPrompter(["", "n", "n"])
     expect(await promptWebsearchOptions(prompter)).toEqual({
       native: { enabled: false },
-      exa: { enabled: false },
     })
   })
 
@@ -272,7 +264,6 @@ describe("promptWebsearchOptions", () => {
       native: { enabled: false },
     })
     expect(asked.filter((question) => /native/i.test(question))).toHaveLength(2)
-    expect(asked.filter((question) => /Exa/i.test(question))).toHaveLength(2)
   })
 })
 

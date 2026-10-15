@@ -1,30 +1,20 @@
 # @macarons/plugin-test-harness
 
-Dev-only test harness for Macarons (2026-07-23 audit §3, issue #116). Before it
-existed the test scaffold was copy-pasted across the suite: the
-packaging skeleton in 15 files, the bundle skeleton in 11, the version-gating
-triad in 11 spellings of which no two matched, the TuiPlugin api mock at 17
-sites, and one poll loop written nine ways. The harness is the single
-definition site; per-plugin domain fixtures and genuinely unique contracts
-(SKILL.md, NOTICE, vendored-rule markers, SUITE cross-checks) deliberately
-stay inline in each plugin's own test files.
+Private, development-only test helpers for Macarons. Runtime packages must not
+depend on this package: it imports `bun:test` and headless rendering tools.
 
-This package is a `devDependency` carrying `bun:test` / `@opentui/solid` machinery that must
-never enter the runtime library's dependency surface, so it cannot fold into
-`permission-rules`. It is `private` and never published.
+- `.` provides `describePackaging`, `describeBundle`, `tick`, `flush`, and `until`.
+- `./view` provides `createSlotMounter` and `settleFrame` for headless rendering.
 
-## Entry points
+The repository's central native packaging suite discovers every plugin and
+checks exported `{ id, setup }` definitions, shipped package-directory entry
+shims, dependencies, and builds. Builds run the package's declared command;
+external imports must be declared runtime dependencies and are resolved from
+a staged dependency scope. Native UI tests supply the v2 `Plugin.Context`
+surface their features consume. The former v1 API mock and version-gating
+helpers have been retired.
 
-- `.` — server-safe: `describePackaging`, `describeBundle`, and the async
-  helpers (`tick`, `flush`, `until`). No TUI types load through this path.
-- `./tui` — `makeTuiApi` (the api mock core a plugin's own `makeApi` extends
-  with its domain surface) and `describeGating` (the compat/locality triad,
-  driven by the library's `BAND_SAMPLE_VERSIONS` — the harness hardcodes no
-  versions).
-- `./view` — `createSlotMounter` and `settleFrame` for view tests under
-  @opentui/solid's headless renderer; separate so engine-only test files
-  never load solid.
-
-`tests/repo/test/test-kinds.test.ts` requires each plugin's packaging (and
-builders' bundle) tests to import the harness, so a scaffold cannot quietly
-fork back to a hand-rolled copy.
+```sh
+bun run --cwd libraries/plugin-test-harness test
+bun run --cwd libraries/plugin-test-harness typecheck
+```

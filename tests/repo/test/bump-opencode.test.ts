@@ -30,7 +30,7 @@ const reconcile = workflow.jobs.bump.steps.find((step) => step.id === "pr")!
 const publish = workflow.jobs.bump.steps.find((step) => step.id === "publish")!
 const base = "a".repeat(40)
 const head = "b".repeat(40)
-const title = "Bump pinned OpenCode to 1.18.15"
+const title = "Bump pinned OpenCode to 2.0.30"
 const openPr = {
   number: 42,
   title,
@@ -51,8 +51,8 @@ function runStep(
   } = {},
 ) {
   const expressions: Record<string, string> = {
-    "steps.versions.outputs.latest": "1.18.15",
-    "steps.versions.outputs.pinned": "1.18.14",
+    "steps.versions.outputs.latest": "2.0.30",
+    "steps.versions.outputs.pinned": "2.0.29",
     "steps.pr.outputs.action": options.action ?? "update",
     "steps.pr.outputs.number": "42",
     "steps.pr.outputs.head": options.expectedHead ?? head,
@@ -203,7 +203,7 @@ describe("nightly OpenCode bump policy", () => {
     ["missing login", [{}]],
     ["missing authors", []],
   ])("preserves branches with %s on either refresh path", (_, authors) => {
-    for (const proposedTitle of [title, "Bump pinned OpenCode to 1.18.14"]) {
+    for (const proposedTitle of [title, "Bump pinned OpenCode to 2.0.29"]) {
       const result = runStep(reconcile, {
         openPrs: [{ ...openPr, title: proposedTitle }],
         comparison: { behind_by: 1 },
@@ -234,7 +234,7 @@ describe("nightly OpenCode bump policy", () => {
       ],
     ],
   ])("preserves branches with %s", (_, commits) => {
-    for (const proposedTitle of [title, "Bump pinned OpenCode to 1.18.14"]) {
+    for (const proposedTitle of [title, "Bump pinned OpenCode to 2.0.29"]) {
       expect(
         runStep(reconcile, {
           openPrs: [{ ...openPr, title: proposedTitle }],
@@ -247,7 +247,7 @@ describe("nightly OpenCode bump policy", () => {
 
   test("still refreshes an older-version bot PR without a base change", () => {
     const result = runStep(reconcile, {
-      openPrs: [{ ...openPr, title: "Bump pinned OpenCode to 1.18.14" }],
+      openPrs: [{ ...openPr, title: "Bump pinned OpenCode to 2.0.29" }],
       commits: [{ authors: [{ login: "github-actions" }] }],
     })
     expect(result).toMatchObject({

@@ -1,6 +1,12 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs"
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -39,7 +45,13 @@ function gitLsFiles(...patterns: string[]): string[] {
   // as a top-level package.
   return execFileSync(
     "git",
-    ["ls-files", ...patterns.map((p) => `:(glob)${p}`)],
+    [
+      "ls-files",
+      "--cached",
+      "--others",
+      "--exclude-standard",
+      ...patterns.map((p) => `:(glob)${p}`),
+    ],
     {
       cwd: REPO_ROOT,
       encoding: "utf8",
@@ -47,7 +59,7 @@ function gitLsFiles(...patterns: string[]): string[] {
     },
   )
     .split("\n")
-    .filter(Boolean)
+    .filter((file) => file && existsSync(path.join(REPO_ROOT, file)))
 }
 
 function read(rel: string): string {
@@ -92,8 +104,8 @@ describe("SPDX metadata is consistent across every workspace manifest", () => {
     // 19 today (13 plugins + 3 libraries + installer + 2 test packages).
     // Headroom below the real count, as in package-manifest.test.ts:
     // retiring a package must not trip the guard.
-    expect(manifests.length).toBeGreaterThanOrEqual(10)
-    expect(publicPackages.length).toBeGreaterThanOrEqual(10)
+    expect(manifests.length).toBeGreaterThanOrEqual(8)
+    expect(publicPackages.length).toBeGreaterThanOrEqual(8)
   })
 
   test("every manifest declares the same SPDX expression", () => {

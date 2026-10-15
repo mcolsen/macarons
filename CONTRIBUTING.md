@@ -1,96 +1,70 @@
-# Contributing To Macarons
+# Contributing to Macarons
 
-## Local Checks
-
-Use [Bun 1.3.14](https://bun.sh) and run commands from the repository root:
+Use Bun 1.3.14 and run from the repository root:
 
 ```sh
 bun install --frozen-lockfile
 bun run check
 ```
 
-`check` runs linting, typechecking, tests, and builds through Turborepo. You can
-also run `bun run lint`, `bun run typecheck`, `bun run test`, and `bun run build`
-individually. To target one package:
+`check` runs lint, TypeScript, unit/integration tests, and builds through
+Turborepo. Target one package with `bun run test --filter=@macarons/cron`.
+`bun run format:check` checks formatting without rewriting files. Tests that use
+mock HTTP servers need permission to bind loopback ports.
+
+## Real-host verification
+
+The active E2E suite targets the version in [`.opencode-version`](.opencode-version)
+and uses temporary homes, projects, credentials, and loopback model providers:
 
 ```sh
-bun run test --filter=@macarons/persist-permissions
+bun run e2e             # server and installer journeys
+bun run e2e:server      # native package loading, hooks, tools, and RPC
+bun run e2e:install     # migrated configuration loaded by the host
+bun run e2e:tui:gating  # required terminal rendering/locality journeys; needs tmux
 ```
 
-`lint` uses `biome check`, including formatting and import order.
-`bun run format:check` checks without writing; `bun run format` rewrites the
-tree, so review its diff before including unrelated changes.
+These commands run `tests/e2e/v2/`. Older V1 journeys remain outside that directory
+as migration reference and are not active checks. Generic sandbox and process
+cleanup coverage is retained in the v2 harness tests. Run package tests through
+their scripts so OpenTUI's JSX preload is applied where required.
 
-Spacing that reaches the terminal must be written as a JSX expression:
-`{"  "}`, not literal repeated spaces in JSX text. Formatters assume browser
-whitespace collapsing; terminal rendering does not. Repository tests guard this.
+The harness honors `OPENCODE_BIN`, then a matching local `opencode` outside CI,
+otherwise downloads the native `@opencode/cli-<platform>` npm archive. Archive
+SHA-512 integrity values are pinned in
+[`.opencode-checksums.json`](.opencode-checksums.json). Cached extracted binaries
+are verified against an installation-time SHA-256 sidecar before execution.
+The upstream installer is never executed. Set `OPENCODE_E2E_VERSION` and either
+`OPENCODE_BIN` or a verified `OPENCODE_E2E_INTEGRITY` to test another release.
 
-## Real-Host Tests
+The nightly bump workflow proposes version/dependency/integrity updates; required
+CI checks must pass before accepting a new baseline. It stops at a major-version
+boundary. See [CI](.github/workflows/ci.yml) for the required job matrix.
 
-The fast checks exclude real-host E2E tests. The harness starts a pinned OpenCode
-binary and a loopback-only scripted model provider. It requires permission to
-bind local ports; TUI journeys also need `tmux` and a usable terminal environment.
-
-```sh
-bun run e2e             # required server, copied-bundle, and installer journeys
-bun run e2e:server      # server journeys, including copied-bundle coverage
-bun run e2e:install     # package-directory installer journeys
-bun run e2e:tui         # advisory terminal journeys
-bun run e2e:tui:gating  # required permission-locality and quota-auth journeys
-```
-
-For individual journeys, use the scripts in
-[`tests/e2e/package.json`](tests/e2e/package.json), for example:
-
-```sh
-bun run --cwd tests/e2e e2e:subagent-comms
-```
-
-The required CI jobs run against [`.opencode-version`](.opencode-version).
-The advisory TUI job is separate from the required TUI gating job; see
-[the workflow](.github/workflows/ci.yml) for the exact matrix and artifact policy.
-The background-task shutdown reproduction is also separate: stock OpenCode's
-known lifecycle limitation and the host patch are documented in
-[`SHUTDOWN.md`](tests/e2e/background-tasks/SHUTDOWN.md).
-
-The harness uses `OPENCODE_BIN` when set, otherwise (outside CI) a matching
-`opencode` on `PATH`, otherwise it downloads the pinned release to
-`$XDG_CACHE_HOME/macarons-e2e/<version>/` (or
-`~/.cache/macarons-e2e/<version>/`). It does not modify your OpenCode installation.
-Downloads must match the SHA-256 in
-[`.opencode-checksums.json`](.opencode-checksums.json); the upstream installation
-script is not executed.
-
-To test another release, set `OPENCODE_E2E_VERSION` and supply either
-`OPENCODE_BIN` or an explicitly verified `OPENCODE_E2E_SHA256`. The committed
-checksums cover only the pinned release.
-
-The nightly [bump workflow](.github/workflows/bump-opencode.yml) proposes newer
-OpenCode pins in a single PR and dispatches CI. A proposed version is not a
-verified baseline until its checks pass and the PR is reviewed and merged.
-
-## Repository Layout
+## Layout and contracts
 
 | Directory | Purpose |
 | --- | --- |
-| `plugins/` | Independently installable plugins, each with its own README and tests. |
-| `libraries/permission-rules/` | Shared permission matching, stores, host guards, and cross-plugin helpers. |
-| `libraries/usage-limits/` | Provider-neutral quota contracts and TUI lifecycle. |
-| `libraries/plugin-test-harness/` | Private development-only test helpers. |
-| `tools/installer/` | Interactive user-level config installer. |
-| `tests/repo/` | Repository-wide invariants and workflow tests. |
-| `tests/e2e/` | Pinned real-host harness and journeys. |
+| `plugins/` | Eight independently installable native v2 plugins. |
+| `libraries/permission-rules/` | Internal approval policy, trusted storage, locality, and shared helpers. |
+| `libraries/usage-limits/` | Provider-neutral server quota RPC and terminal lifecycle. |
+| `libraries/plugin-test-harness/` | Private packaging, bundle, async, and headless-render helpers. |
+| `tools/installer/` | User-level config migration and interactive installer. |
+| `tests/repo/` | Manifest, native-entry, dependency, documentation, and workflow invariants. |
+| `tests/e2e/v2/` | Pinned real-host journeys. |
 
-Keep code in its plugin until a second consumer needs the same API. Share
-mechanisms, not plugin-specific policy; see [the library guide](libraries/README.md).
-Plugins can have a server entry, a TUI entry, or both. Source and package-directory
-installs need checkout dependencies but no build. Copied distribution bundles
-require a build; E2E tests exercise those separately.
+Server plugins default-export `Plugin.define` from `@opencode/plugin`; terminal
+plugins use `@opencode/plugin/tui`. Local package directories also require root
+`index.ts`/`server.ts` and `tui.ts(x)` shims. Source installs use workspace
+dependencies; built artifacts require their declared runtime dependencies.
+Build checks exercise the actual package scripts and staged artifact imports.
 
-## Pull Requests
+Preserve v2's native behavior where it already covers a feature. See
+[MIGRATION.md](MIGRATION.md) before adding back retired features. Keep mechanisms
+shared only when there are two consumers. Terminal whitespace must be explicit
+JSX strings such as `{"  "}` because browser-style whitespace collapse differs.
 
-Keep changes focused, add regression coverage for behavior changes, and update
-the affected plugin's README when its configuration or behavior changes. Run
-`bun run check` and the relevant real-host journeys, and report any checks you
-could not run. Do not include credentials, private transcripts, or local test
-artifacts in commits or issue reports.
+Update affected README files when behavior changes, preserve meaningful pure
+regression tests, and add native API/real-host coverage for contract changes.
+Report checks that could not run. Do not commit credentials, transcripts, or
+local artifacts.

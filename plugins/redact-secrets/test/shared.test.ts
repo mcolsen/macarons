@@ -1,19 +1,12 @@
 import { describe, expect, test } from "bun:test"
 import {
-  BAND_SAMPLE_VERSIONS as BAND,
-  validAuthType as libraryValidAuthType,
-  validatedAuthStore as libraryValidatedAuthStore,
-} from "@macarons/permission-rules"
-import {
   COMPACTION_NOTE,
-  catalogWireCandidates,
   DEFAULT_OPTIONS,
   dropContentLength,
   FINGERPRINT_MAX_CANDIDATES,
   FINGERPRINT_SCAN_LIMIT_MARKER,
   type FingerprintEntry,
   HistoryPins,
-  hasAuthEntry,
   isOpaqueBinaryPayload,
   MAX_VAULT_CHARS,
   MAX_VAULT_SECRETS,
@@ -22,24 +15,18 @@ import {
   MAX_WIRE_BODY_BYTES,
   OPAQUE_PROVIDER_KEYS,
   OversizedBodyError,
-  openCodeCompatNotice,
   PLACEHOLDER_RE,
   parseOptions,
   percentDecodeTolerant,
   placeholderFor,
   Redactor,
   redactWireRequest,
-  runtimeFlagEnabled,
   type ScanLimitInfo,
-  SUPPORTED_OPENCODE_RANGE,
   SYSTEM_NOTE,
   secretHash,
   serializeForKeywordSweep,
   UnscannableBodyError,
-  unsafeWireProviders,
   VaultLimitError,
-  validAuthType,
-  validatedAuthStore,
   WalkLimitError,
 } from "../src/shared"
 import { fingerprintLimitFixture } from "./fingerprint-limit.fixture"
@@ -61,41 +48,6 @@ function placeholderOf(redacted: string): string {
   if (!match) throw new Error(`no placeholder in: ${redacted}`)
   return match[0]
 }
-
-describe("version guard", () => {
-  const R = SUPPORTED_OPENCODE_RANGE
-  const notice = (v: string | undefined) =>
-    openCodeCompatNotice(v, R, "redact-secrets")
-
-  // Samples derive from the band so the nightly ratchet cannot strand them.
-  test("the verified band runs silently (no notice)", () => {
-    expect(notice(BAND.floor)).toBeNull()
-    expect(notice(BAND.inBand)).toBeNull()
-    expect(notice(`${BAND.floor}+sha.abc`)).toBeNull()
-  })
-
-  test("any v1 outside the band warns but keeps redacting", () => {
-    for (const v of [
-      BAND.belowBand,
-      BAND.aboveBand,
-      `${BAND.floor}-rc.1`,
-      "junk",
-      undefined,
-    ]) {
-      const n = notice(v)
-      expect(n?.compat).toBe("untested")
-      expect(n?.disable).toBe(false)
-    }
-  })
-
-  test("a non-v1 host (incl. the v2 beta) disables redaction", () => {
-    for (const v of ["2.0.0", "2.0.0-beta.1", "0.9.9"]) {
-      const n = notice(v)
-      expect(n?.compat).toBe("incompatible")
-      expect(n?.disable).toBe(true)
-    }
-  })
-})
 
 describe("placeholders", () => {
   test("are deterministic across redactor instances and processes under one key", () => {
@@ -2974,8 +2926,6 @@ describe("options", () => {
     expect(parseOptions(undefined)).toEqual(DEFAULT_OPTIONS)
     expect(parseOptions("garbage")).toEqual(DEFAULT_OPTIONS)
     expect(DEFAULT_OPTIONS.systemNote).toBe(true)
-    expect(DEFAULT_OPTIONS.restoreText).toBe(true)
-    expect(DEFAULT_OPTIONS.wireBackstop).toBe(true)
   })
 
   test("explicit values are honored", () => {
@@ -2988,147 +2938,6 @@ describe("options", () => {
     })
     expect([...options.disabledRules]).toEqual(["generic-api-key"])
     expect(options.systemNote).toBe(false)
-    expect(options.restoreText).toBe(false)
-    expect(options.wireBackstop).toBe(false)
-    expect(options.wireSkipProviders.has("ollama")).toBe(true)
-  })
-})
-
-describe("unsafeWireProviders", () => {
-  test("flags oauth-authed providers and always the fetch-owning built-ins", () => {
-    const unsafe = unsafeWireProviders({
-      openai: { type: "oauth", access: "x" },
-      anthropic: { type: "api", key: "x" },
-    })
-    expect(unsafe.has("openai")).toBe(true)
-    expect(unsafe.has("anthropic")).toBe(false)
-    // These three get a host-installed fetch at assembly time — clobbering
-    // it breaks their auth or request shaping, auth entry or not.
-    for (const providerID of [
-      "github-copilot",
-      "google-vertex",
-      "snowflake-cortex",
-    ]) {
-      expect(unsafe.has(providerID)).toBe(true)
-      expect(unsafeWireProviders(undefined).has(providerID)).toBe(true)
-    }
-  })
-})
-
-// The filter itself is the library's since audit §2.3, and its host-parity
-// table lives with it (libraries/permission-rules/test/auth-store.test.ts).
-// What has to hold HERE is the thing this plugin does with the result: a
-// dropped entry must stop marking a provider unsafe to wrap, and a kept one
-// must survive as the raw entry the wire-backstop checks re-read.
-describe("auth entry validation feeding the wire backstop", () => {
-  test("the filter is the library's, re-exported", () => {
-    expect(validAuthType).toBe(libraryValidAuthType)
-    expect(validatedAuthStore).toBe(libraryValidatedAuthStore)
-  })
-
-  test("validatedAuthStore keeps valid entries and drops malformed ones", () => {
-    const store = validatedAuthStore({
-      openai: { type: "oauth" }, // stale, dropped
-      anthropic: { type: "api", key: "sk-x" }, // kept
-      mistral: { type: "oauth", refresh: "r", access: "a", expires: 0 }, // kept
-      junk: "not-an-object", // dropped
-    })
-    expect(Object.keys(store).sort()).toEqual(["anthropic", "mistral"])
-    // The kept entries are the raw ones (their type survives downstream checks).
-    expect(unsafeWireProviders(store).has("mistral")).toBe(true)
-    expect(unsafeWireProviders(store).has("anthropic")).toBe(false)
-    // A dropped stale oauth entry no longer marks openai unsafe.
-    expect(unsafeWireProviders(store).has("openai")).toBe(false)
-  })
-})
-
-describe("catalogWireCandidates", () => {
-  const catalog = {
-    openai: { id: "openai", env: ["OPENAI_API_KEY"], models: {} },
-    anthropic: { id: "anthropic", env: ["ANTHROPIC_API_KEY"], models: {} },
-    mistral: { id: "mistral", env: ["MISTRAL_API_KEY"], models: {} },
-  }
-
-  test("catalog providers with a set env key are candidates", () => {
-    const candidates = catalogWireCandidates(
-      catalog,
-      { OPENAI_API_KEY: "sk-x", UNRELATED: "y" },
-      undefined,
-    )
-    expect([...candidates]).toEqual(["openai"])
-  })
-
-  test("an empty env value does not activate, mirroring the host's find(Boolean)", () => {
-    expect(
-      catalogWireCandidates(catalog, { OPENAI_API_KEY: "" }, undefined).size,
-    ).toBe(0)
-  })
-
-  test("api-key auth entries count only for catalog providers; oauth and wellknown never do", () => {
-    const candidates = catalogWireCandidates(
-      catalog,
-      {},
-      {
-        anthropic: { type: "api", key: "x" },
-        mistral: { type: "oauth", access: "x" },
-        openai: { type: "wellknown", key: "x", token: "t" },
-        "my-local-proxy": { type: "api", key: "x" }, // not in the catalog: config-only provider
-      },
-    )
-    expect([...candidates]).toEqual(["anthropic"])
-  })
-
-  test("junk shapes degrade to no candidates", () => {
-    expect(
-      catalogWireCandidates(undefined, { OPENAI_API_KEY: "x" }, undefined).size,
-    ).toBe(0)
-    expect(catalogWireCandidates("garbage", {}, undefined).size).toBe(0)
-    expect(
-      catalogWireCandidates(
-        { openai: { env: "not-an-array" } },
-        { OPENAI_API_KEY: "x" },
-        undefined,
-      ).size,
-    ).toBe(0)
-  })
-})
-
-describe("host environment mirrors", () => {
-  test("runtimeFlagEnabled accepts exactly the host's truthy literals", () => {
-    for (const enabled of ["true", "yes", "on", "1", "y"]) {
-      expect(runtimeFlagEnabled(enabled)).toBe(true)
-    }
-    for (const disabled of [
-      "false",
-      "no",
-      "off",
-      "0",
-      "n",
-      "TRUE",
-      " true",
-      "",
-      undefined,
-    ]) {
-      expect(runtimeFlagEnabled(disabled)).toBe(false)
-    }
-  })
-
-  test("hasAuthEntry sees entries of any type and rejects junk shapes", () => {
-    expect(hasAuthEntry({ openai: { type: "api", key: "x" } }, "openai")).toBe(
-      true,
-    )
-    expect(
-      hasAuthEntry(
-        { openai: { type: "wellknown", key: "x", token: "t" } },
-        "openai",
-      ),
-    ).toBe(true)
-    expect(
-      hasAuthEntry({ anthropic: { type: "api", key: "x" } }, "openai"),
-    ).toBe(false)
-    expect(hasAuthEntry({ openai: "not-an-entry" }, "openai")).toBe(false)
-    expect(hasAuthEntry(undefined, "openai")).toBe(false)
-    expect(hasAuthEntry(null, "openai")).toBe(false)
   })
 })
 

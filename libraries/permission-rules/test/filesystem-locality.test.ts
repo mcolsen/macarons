@@ -72,29 +72,17 @@ function marker(root: string, challenge: Event): string {
 function transport(deliver: (event: Event) => Promise<unknown>) {
   const calls: { event: Event; directory: string; signal: AbortSignal }[] = []
   const controller = new AbortController()
-  const tui = {
-    async publish(
-      this: unknown,
-      parameters: { directory: string; body: Event },
-      options: { signal: AbortSignal },
-    ) {
-      expect(this).toBe(tui)
-      expect(parameters.directory).toBe(roots[2] as string)
-      expect(parameters.body.type).toBe("tui.command.execute")
-      expect(options.signal).toBeInstanceOf(AbortSignal)
-      calls.push({
-        event: parameters.body,
-        directory: parameters.directory,
-        signal: options.signal,
-      })
-      return deliver(parameters.body)
+  const api = {
+    signal: controller.signal,
+    async publish(this: unknown, command: string, signal: AbortSignal) {
+      expect(this).toBe(api)
+      expect(signal).toBeInstanceOf(AbortSignal)
+      const message = { type: "tui.command.execute", properties: { command } }
+      calls.push({ event: message, directory: roots[2] as string, signal })
+      return deliver(message)
     },
   }
-  return {
-    api: { client: { tui }, lifecycle: { signal: controller.signal } },
-    calls,
-    controller,
-  }
+  return { api, calls, controller }
 }
 
 function verify(api: unknown, paths = roots, timeoutMs = 250) {
@@ -342,13 +330,9 @@ describe("filesystem locality proof", () => {
   test("one deadline bounds HTTP plus polling and aborts an uncooperative transport", async () => {
     const signals: AbortSignal[] = []
     const api = {
-      client: {
-        tui: {
-          publish: (_input: unknown, options: { signal: AbortSignal }) => {
-            signals.push(options.signal)
-            return new Promise(() => {})
-          },
-        },
+      publish: (_command: string, signal: AbortSignal) => {
+        signals.push(signal)
+        return new Promise(() => {})
       },
     }
     const start = performance.now()

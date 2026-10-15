@@ -1,30 +1,8 @@
 name: Nightly OpenCode bump
 
-# Checks whether OpenCode has published a release newer than the pin in
-# .opencode-version. If not, exits successfully. If so, bumps the pin
-# everywhere it appears and opens (or refreshes) a single rolling PR. The
-# bump is deliberately unvalidated here: CI on the PR is the gate, and a
-# human merges it.
-#
-# Macarons tracks OpenCode evergreen (issue #33): the bump advances not just
-# the e2e pin but every workspace package's @opencode-ai/* pins and the shared
-# SUPPORTED_OPENCODE_RANGE constant — floor = the pin, ceiling = the pin's
-# next minor line. (package.json#engines stays a static v1-wide install gate
-# on purpose: OpenCode's npm route hard-enforces engines, so a ratcheting
-# range would refuse installs on any host lagging the pin.) The bump PR's CI is
-# therefore the current-host typecheck lane: a release whose plugin API types
-# break a plugin turns this PR red, and the fix lands on main (never on the
-# bump branch — it is force-pushed on every refresh). A major-version release
-# is never ratcheted mechanically; the job fails loudly for a human decision.
-#
-# Accepted supply-chain exposure, by design: a compromised upstream OpenCode
-# release published under a new version would be pinned here and executed on
-# CI runners (by the bump PR's e2e jobs) within ~24 hours. Mitigations: this
-# workflow only records GitHub's own release digests and never runs anything
-# it downloads, the e2e jobs run the pinned binary with a read-only token
-# and no secrets, and nothing reaches main without a human merging the PR.
-# The same acceptance covers the @opencode-ai/* npm packages the bump PR's
-# `bun install` brings into every workspace on CI.
+# Advances the pinned OpenCode v2 release and native @opencode/* packages.
+# Major upgrades remain manual. The reviewed PR is validated by CI; npm
+# tarball SHA-512 integrity values are recorded without executing artifacts.
 
 on:
   schedule:
@@ -63,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           pinned="$(cat .opencode-version)"
-          latest="$(curl --fail --silent --show-error https://registry.npmjs.org/opencode-ai/latest | jq -r .version)"
+          latest="$(curl --fail --silent --show-error https://registry.npmjs.org/@opencode/cli/latest | jq -r .version)"
           echo "Pinned: $pinned  Latest: $latest"
           [[ "$latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
             echo "::error::Unexpected latest version format: $latest"
@@ -75,17 +53,17 @@ jobs:
             exit 0
           fi
           # The evergreen ratchet stops at a major boundary: the plugins
-          # hard-disable on non-v1 hosts, so crossing one is a support-policy
+          # target native v2 hosts, so crossing one is a support-policy
           # decision made by hand, not a mechanical rewrite. Fail loudly.
           if [ "${latest%%.*}" != "${pinned%%.*}" ]; then
             echo "::error::OpenCode $latest crosses a major boundary (pinned: $pinned). Revisit the support policy and bump by hand."
             exit 1
           fi
-          # The e2e package and workspace packages may pin @opencode-ai/*
+          # The e2e package and workspace packages may pin @opencode/*
           # dependencies. These packages are published in lockstep with the
           # CLI, but if a publish is still in flight the bump PR could not even
           # install, so retry tomorrow.
-          for pkg in "@opencode-ai/sdk" "@opencode-ai/plugin"; do
+          for pkg in "@opencode/client" "@opencode/plugin" "@opencode/ai" "@opencode/theme"; do
             if ! curl --fail --silent --output /dev/null "https://registry.npmjs.org/$pkg/$latest"; then
               echo "$pkg@$latest is not on npm yet; retrying on the next run."
               echo "bump=false" >> "$GITHUB_OUTPUT"
@@ -187,33 +165,8 @@ jobs:
           # if a file stops mentioning the pin, fix this section rather than
           # letting the bump drift.
 
-          # The verified band derives from each version: floor = the release,
-          # ceiling = its next minor line. The major guard in the compare step
-          # means both bands always share a major here. (Docs no longer state
-          # the pin or the band in prose — they describe the ratchet policy —
-          # so there is nothing to rewrite outside structured files.)
-          major="${latest%%.*}"; rest="${latest#*.}"; minor="${rest%%.*}"
-          new_band=">=$latest <$major.$((minor + 1)).0"
-          pmajor="${pinned%%.*}"; prest="${pinned#*.}"; pminor="${prest%%.*}"
-          old_band=">=$pinned <$pmajor.$((pminor + 1)).0"
-
-          # The shared library is the sole definition site of the band; every
-          # plugin re-exports the constant from there.
-          lib=libraries/permission-rules/src/index.ts
-          grep -Fq "SUPPORTED_OPENCODE_RANGE = \"$old_band\"" "$lib" || {
-            echo "::error::$lib no longer declares the band $old_band; update bump-opencode.yml."
-            exit 1
-          }
-          perl -pi -e "s/\QSUPPORTED_OPENCODE_RANGE = \"$old_band\"\E/SUPPORTED_OPENCODE_RANGE = \"$new_band\"/" "$lib"
-
-          # Every tracked workspace manifest may pin @opencode-ai/* packages
-          # (runtime deps where the host loads src, dev deps otherwise). Drive
-          # the inventory from git so a library or test package cannot silently
-          # fall outside this ratchet.
-          # engines.opencode is a static v1-wide install gate the bump never
-          # touches (see OPENCODE_ENGINE_RANGE in the shared library). Guards
-          # first: a package that stops carrying a pin means this section needs
-          # updating, not a silent skip.
+          # Native SDK packages are published in lockstep with the CLI.
+          # engines.opencode remains the v2 install gate; no V1 runtime band exists.
           mapfile -t package_files < <(
             git ls-files \
               ':(glob)package.json' \
@@ -229,51 +182,44 @@ jobs:
           for file in "${package_files[@]}"; do
             stale="$(jq -r --arg pinned "$pinned" '
               [.dependencies // {}, .devDependencies // {}]
-              | map(to_entries[] | select(.key | startswith("@opencode-ai/")) | select(.value != $pinned))
+              | map(to_entries[] | select(.key | startswith("@opencode/")) | select(.value != $pinned))
               | length' "$file")"
             [ "$stale" = "0" ] || {
-              echo "::error::$file pins an @opencode-ai package away from $pinned; update bump-opencode.yml."
+              echo "::error::$file pins an @opencode package away from $pinned; update bump-opencode.yml."
               exit 1
             }
             jq --arg version "$latest" '
-              (if .dependencies then .dependencies |= with_entries(if (.key | startswith("@opencode-ai/")) then .value = $version else . end) else . end)
-              | (if .devDependencies then .devDependencies |= with_entries(if (.key | startswith("@opencode-ai/")) then .value = $version else . end) else . end)
+              (if .dependencies then .dependencies |= with_entries(if (.key | startswith("@opencode/")) then .value = $version else . end) else . end)
+              | (if .devDependencies then .devDependencies |= with_entries(if (.key | startswith("@opencode/")) then .value = $version else . end) else . end)
             ' "$file" > "$file.tmp"
             mv "$file.tmp" "$file"
           done
+          PINNED="$pinned" NEXT="$latest" bun -e '
+            const file = Bun.file("README.md")
+            const source = await file.text()
+            const before = `current target is **OpenCode ${process.env.PINNED}**`
+            const after = `current target is **OpenCode ${process.env.NEXT}**`
+            if (!source.includes(before)) throw new Error("README target version is not at the current pin")
+            await Bun.write(file, source.replace(before, after))
+          '
           printf '%s\n' "$latest" > .opencode-version
 
-      - name: Record release checksums
+      - name: Record npm artifact integrity
         if: steps.versions.outputs.bump == 'true' && steps.pr.outputs.action != 'skip'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           latest="${{ steps.versions.outputs.latest }}"
-
-          # Pin GitHub's SHA-256 digest metadata for every CLI artifact the
-          # harness can select. CI exercises this same verified downloader.
-          gh api "repos/anomalyco/opencode/releases/tags/v$latest" \
-            | jq --arg version "$latest" '
-                [
-                  "opencode-linux-x64.tar.gz",
-                  "opencode-linux-x64-musl.tar.gz",
-                  "opencode-linux-x64-baseline.tar.gz",
-                  "opencode-linux-x64-baseline-musl.tar.gz",
-                  "opencode-linux-arm64.tar.gz",
-                  "opencode-linux-arm64-musl.tar.gz",
-                  "opencode-darwin-arm64.zip",
-                  "opencode-darwin-x64.zip",
-                  "opencode-darwin-x64-baseline.zip"
-                ] as $expected
-                | [.assets[] | select(.name as $name | $expected | index($name))
-                    | {key: .name, value: (.digest // "" | sub("^sha256:"; ""))}]
-                | sort_by(.key)
-                | if length != ($expected | length) or any(.[]; .value | test("^[0-9a-f]{64}$") | not)
-                  then error("release omitted a required SHA-256 asset digest")
-                  else {version: $version, assets: from_entries}
-                  end
-              ' > .opencode-checksums.json
+          checksums='{}'
+          for target in darwin-arm64 darwin-x64 darwin-x64-baseline linux-arm64 linux-arm64-musl linux-x64 linux-x64-baseline linux-x64-baseline-musl linux-x64-musl windows-arm64 windows-x64 windows-x64-baseline; do
+            metadata="$(curl --fail --silent --show-error "https://registry.npmjs.org/@opencode/cli-$target/$latest")"
+            integrity="$(jq -er --arg version "$latest" --arg package "@opencode/cli-$target" '
+              if .version != $version or .name != $package then error("package identity mismatch") else .dist.integrity end
+              | select(test("^sha512-[A-Za-z0-9+/]{86}==$"))' <<<"$metadata")"
+            checksums="$(jq --arg asset "cli-$target-$latest.tgz" --arg integrity "$integrity" '. + {($asset): $integrity}' <<<"$checksums")"
+          done
+          jq --arg version "$latest" --argjson assets "$checksums" \
+            '{version: $version, registry: "https://registry.npmjs.org", assets: $assets}' \
+            <<< '{}' > .opencode-checksums.json
 
       - name: Refresh dependency lockfile
         if: steps.versions.outputs.bump == 'true' && steps.pr.outputs.action != 'skip'
@@ -291,16 +237,17 @@ jobs:
           pinned="${{ steps.versions.outputs.pinned }}"
           latest="${{ steps.versions.outputs.latest }}"
           title="Bump pinned OpenCode to $latest"
-          body="$(cat <<EOF
+          body_file="$(mktemp)"
+          trap 'rm -f "$body_file"' EXIT
+          cat > "$body_file" <<EOF
           Nightly check: OpenCode $latest is out; the pin was $pinned.
 
           Mechanical bump of every surface that carries the pin:
 
           - \`.opencode-version\` — canonical pin used by the e2e jobs
-          - \`.opencode-checksums.json\` — GitHub-published SHA-256 digests for every supported CLI artifact
+          - \`.opencode-checksums.json\` — npm-published SHA-512 integrity for every supported CLI artifact
           - \`bun.lock\` — the resolved workspace dependency graph
-          - every workspace package's \`@opencode-ai/*\` pins
-          - \`SUPPORTED_OPENCODE_RANGE\` in \`libraries/permission-rules\` — the verified band; floor = this pin (\`engines\` is a static v1-wide install gate and does not move)
+          - every workspace package's \`@opencode/*\` pins
 
           Nothing was validated by this workflow on purpose: this PR's CI run
           typechecks every plugin against the $latest packages and downloads,
@@ -311,7 +258,6 @@ jobs:
           release never reaches this PR; the nightly job halts loudly instead,
           because crossing a major is a support-policy decision made by hand.)
           EOF
-          )"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -329,7 +275,6 @@ jobs:
             .opencode-version \
             .opencode-checksums.json \
             bun.lock \
-            libraries/permission-rules/src/index.ts \
             "${package_files[@]}"
           if ! git diff --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
             echo "::error::Version bump changed files outside the publish allowlist."
@@ -348,9 +293,9 @@ jobs:
           git push --force-with-lease="refs/heads/$BRANCH:${{ steps.pr.outputs.head }}" origin "HEAD:refs/heads/$BRANCH"
 
           if [ "${{ steps.pr.outputs.action }}" = "update" ]; then
-            gh pr edit "${{ steps.pr.outputs.number }}" --title "$title" --body "$body"
+            gh pr edit "${{ steps.pr.outputs.number }}" --title "$title" --body-file "$body_file"
           else
-            gh pr create --base main --head "$BRANCH" --title "$title" --body "$body"
+            gh pr create --base main --head "$BRANCH" --title "$title" --body-file "$body_file"
           fi
           echo "dispatch-ci=true" >> "$GITHUB_OUTPUT"
 

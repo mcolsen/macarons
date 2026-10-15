@@ -160,11 +160,22 @@ describe("the permission-rules library is the sole definition site of every shar
   test("the sweep covers every plugin and tool package", () => {
     // A broken walk of EITHER root must fail loudly, never shrink silently —
     // the 2026-07-23 audit's blind spot was a root this sweep did not walk.
-    // ≥ the 12 plugin packages at the time of writing; ≥ the 1 tool package
-    // (tools/installer). Removing one is a loud, deliberate roster update; a
-    // broken walk is not.
-    expect(pluginPackages.length).toBeGreaterThanOrEqual(12)
-    expect(toolPackages.length).toBeGreaterThanOrEqual(1)
+    // V2 retains these eight plugins after retiring built-in duplicates.
+    // Pin names rather than the pre-migration count: losing any retained
+    // package still fails, while newly added packages join the sweep below.
+    expect(pluginPackages).toEqual(
+      expect.arrayContaining([
+        "approve-for-me",
+        "cache-ratio",
+        "codex-limits",
+        "cron",
+        "redact-secrets",
+        "scoped-system-prompts",
+        "synthetic-limits",
+        "web-search",
+      ]),
+    )
+    expect(toolPackages).toContain("installer")
     const covered = [
       ...new Set(files.map(({ rootLabel, name }) => `${rootLabel}/${name}`)),
     ].sort()

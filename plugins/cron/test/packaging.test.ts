@@ -1,14 +1,17 @@
-import { describePackaging } from "@macarons/plugin-test-harness"
+import { expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
+import plugin from "../index"
+import manifest from "../package.json"
 
-// cron is server-only by design — it has no UI of its own — so there must be
-// no ./tui export for the installer to discover. croner does the actual
-// expression parsing and next-match arithmetic; the host loads src directly,
-// so it (and the plugin/tool helper) must be real dependencies while the
-// type-only sdk stays dev-side.
-
-describePackaging({
-  testDir: import.meta.dir,
-  serverExport: "CronPlugin",
-  runtimeDeps: ["@opencode-ai/plugin", "croner"],
-  devOnlyDeps: ["@opencode-ai/sdk"],
+test("native plugin exports a default object from its local package root", () => {
+  expect(plugin.id).toBe("macarons.cron")
+  expect(typeof plugin.setup).toBe("function")
+  expect(manifest.dependencies["@opencode/plugin"]).toBe(
+    readFileSync(
+      new URL("../../../.opencode-version", import.meta.url),
+      "utf8",
+    ).trim(),
+  )
+  expect(manifest.engines.opencode).toBe(">=2.0.29 <3.0.0")
+  expect(manifest.exports).not.toHaveProperty("./tui")
 })

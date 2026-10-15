@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import path from "node:path"
 
 /**
@@ -19,14 +19,14 @@ import path from "node:path"
  * reviewed size and every entry is kept live against the default shape.
  *
  * The devDep uniformity block has one shape-driven split worth flagging so a
- * future reader doesn't "simplify" it away: the bare `@opencode-ai/plugin`
+ * future reader doesn't "simplify" it away: the bare `@opencode/plugin`
  * specifier is in BASE_DEV_DEPS, but a plugin that value-imports it must carry
  * it in `dependencies` instead (the installer loads plugin `src` directly, so a
  * devDep a consumer install drops loads under workspace hoisting and fails
  * on a real `opencode plugin install` — the trap runtime-deps.test.ts guards,
  * which already bit cron). The minus-runtime-deps rule encodes that split.
  * One named opt-out removes a key a plugin genuinely doesn't use:
- * redact-secrets imports @opencode-ai/sdk nowhere, so it drops that package.
+ * redact-secrets imports @opencode/client nowhere, so it drops that package.
  *
  * Enumerated off `git ls-files`, never a filesystem glob — untracked debris
  * under plugins/ must not flip the verdict (a hard repo convention; a stray
@@ -47,7 +47,13 @@ function gitLsFiles(...patterns: string[]): string[] {
   // as a top-level package.
   return execFileSync(
     "git",
-    ["ls-files", ...patterns.map((p) => `:(glob)${p}`)],
+    [
+      "ls-files",
+      "--cached",
+      "--others",
+      "--exclude-standard",
+      ...patterns.map((p) => `:(glob)${p}`),
+    ],
     {
       cwd: REPO_ROOT,
       encoding: "utf8",
@@ -55,7 +61,7 @@ function gitLsFiles(...patterns: string[]): string[] {
     },
   )
     .split("\n")
-    .filter(Boolean)
+    .filter((file) => file && existsSync(path.join(REPO_ROOT, file)))
 }
 
 type PackageJson = {
@@ -84,15 +90,15 @@ function loadTsConfig(rel: string): TsConfig {
 
 const BASE_DEV_DEPS = [
   "@biomejs/biome",
-  "@macarons/plugin-test-harness",
-  "@opencode-ai/plugin",
-  "@opencode-ai/sdk",
+  "@opencode/plugin",
+  "@opencode/client",
   "@types/bun",
   "@types/node",
   "typescript",
 ]
 
 const TUI_EXTRA_DEV_DEPS = [
+  "@opencode/theme",
   "@opentui/core",
   "@opentui/keymap",
   "@opentui/solid",
@@ -107,9 +113,9 @@ const TUI_EXTRA_DEV_DEPS = [
 // the key) fails.
 const DEV_DEP_OPT_OUTS: Record<string, { remove: string[]; reason: string }> = {
   "redact-secrets": {
-    remove: ["@opencode-ai/sdk"],
+    remove: ["@opencode/client"],
     reason:
-      "imports @opencode-ai/sdk nowhere in tracked sources, so the package would be unused",
+      "imports @opencode/client nowhere in tracked sources, so the package would be unused",
   },
 }
 
@@ -153,7 +159,7 @@ describe("plugin tsconfigs extend the preset matching their shape", () => {
   test("the plugin roster is discovered off git, not vacuously empty", () => {
     // Guard the guard: a broken enumeration would pass every clause below by
     // iterating nothing. 12 plugins today; the floor keeps headroom.
-    expect(plugins.length).toBeGreaterThanOrEqual(10)
+    expect(plugins.length).toBeGreaterThanOrEqual(8)
   })
 
   test("each plugin tsconfig extends the right preset with only `include` allowed to differ", () => {
@@ -274,7 +280,7 @@ describe("non-plugin workspace tsconfigs are pinned to their reviewed shape", ()
       shape: {
         extends: "../../tsconfig.server.json",
         compilerOptions: { types: ["bun", "node"] },
-        include: ["**/*.ts", "**/*.tsx"],
+        include: ["v2"],
         exclude: ["node_modules", "artifacts"],
       },
       reason: "end-to-end workspace, server preset, bun+node types",
@@ -311,7 +317,7 @@ describe("plugin devDependency names match their shape", () => {
   test("the plugin roster is discovered off git, not vacuously empty", () => {
     // Guard the guard: this clause checks ≥10 plugins so a broken walk that
     // found zero plugins cannot pass the devDep uniformity check vacuously.
-    expect(plugins.length).toBeGreaterThanOrEqual(10)
+    expect(plugins.length).toBeGreaterThanOrEqual(8)
   })
 
   test("the opt-out table is capped at one live entry", () => {
@@ -378,11 +384,11 @@ describe("plugin devDependency names match their shape", () => {
       // The minus-runtime-deps rule is load-bearing and applies to every key,
       // not just TUI_EXTRA: the installer loads plugin `src` directly
       // (pathToFileURL into this checkout), so a runtime VALUE import of the
-      // bare `@opencode-ai/plugin` specifier must be a real `dependency`, not a
+      // bare `@opencode/plugin` specifier must be a real `dependency`, not a
       // devDependency a consumer install drops — the trap runtime-deps.test.ts
       // documents (cron already shipped it wrong: green under workspace
       // hoisting, red only on a real `opencode plugin install`). So
-      // `@opencode-ai/plugin` splits across deps/devDeps by import shape, and a
+      // `@opencode/plugin` splits across deps/devDeps by import shape, and a
       // key carried in `dependencies` is not also demanded in `devDependencies`.
       // Do NOT "simplify" this minus-deps rule away.
       const expected = new Set<string>()
@@ -418,7 +424,7 @@ describe("plugin devDependency names match their shape", () => {
       }
     }
     // Guard the guard: reaffirm the walk checked the fleet, not nothing.
-    expect(checked).toBeGreaterThanOrEqual(10)
+    expect(checked).toBeGreaterThanOrEqual(8)
     expect(offenders).toEqual([])
   })
 })

@@ -91,8 +91,11 @@ const LEGACY_PACKAGE_NAMES = [
   "@macarons/permissions-approve-for-me",
   "@mcolsen-opencode/permissions-approve-for-me",
 ] as const
-const MODULE_ID = "opencode-approve-for-me"
-const LEGACY_MODULE_IDS = ["opencode-permissions-approve-for-me"] as const
+const MODULE_ID = "macarons.approve-for-me"
+const LEGACY_MODULE_IDS = [
+  "opencode-permissions-approve-for-me",
+  "opencode-approve-for-me",
+] as const
 const PACKAGE_SPEC_NAMES = new Set<string>([
   PACKAGE_NAME,
   ...LEGACY_PACKAGE_NAMES,
@@ -778,21 +781,21 @@ export async function scanPluginConfigFile(
     ownOptions: undefined,
     pluginSpecs: [],
   }
-  if (!Object.hasOwn(parsed, "plugin")) return scan
+  if (!Object.hasOwn(parsed, "plugins")) return scan
   scan.definesPlugin = true
-  if (!Array.isArray(parsed.plugin)) return "unreadable"
+  if (!Array.isArray(parsed.plugins)) return "unreadable"
   const dir = path.dirname(file)
-  for (const entry of parsed.plugin) {
+  for (const entry of parsed.plugins) {
     let spec: unknown
     let options: unknown
     if (typeof entry === "string") spec = entry
     else if (
-      Array.isArray(entry) &&
-      (entry.length === 1 || entry.length === 2) &&
-      typeof entry[0] === "string"
+      isPlainObject(entry) &&
+      typeof entry.package === "string" &&
+      (entry.options === undefined || isPlainObject(entry.options))
     ) {
-      spec = entry[0]
-      options = entry[1]
+      spec = entry.package
+      options = entry.options
     } else return "unreadable"
     scan.pluginSpecs.push(spec as string)
     if (await isOwnPluginSpec(spec as string, dir, packageDir)) {
@@ -805,7 +808,7 @@ export async function scanPluginConfigFile(
 }
 
 export function globalConfigCandidates(configDir: string) {
-  return ["config.json", "opencode.json", "opencode.jsonc"].map((name) =>
+  return ["opencode.json", "opencode.jsonc"].map((name) =>
     path.join(configDir, name),
   )
 }
@@ -841,7 +844,7 @@ async function winningGlobalPluginScan(
     const scan = await scanPluginConfigFile(real, packageDir)
     if (scan === "missing") continue
     if (scan === "unreadable") return "unreadable"
-    if (scan.definesPlugin) winner = scan
+    if (scan.hasOwnEntry) winner = scan
   }
   return winner
 }
@@ -883,7 +886,7 @@ export function worktreeConfigCandidates(
       path.join(item, "opencode.json"),
       path.join(item, "opencode.jsonc"),
     )
-  for (const item of chain)
+  for (const item of chain.toReversed())
     candidates.push(
       path.join(item, ".opencode", "opencode.json"),
       path.join(item, ".opencode", "opencode.jsonc"),
@@ -1011,7 +1014,7 @@ export async function scanSideloadSources(
   }
   const found: { file: string; hash: string }[] = []
   for (const item of chain)
-    for (const bucket of ["plugin", "plugins"]) {
+    for (const bucket of ["plugins"]) {
       const sub = path.join(item, ".opencode", bucket)
       let names: string[]
       try {
@@ -1193,20 +1196,20 @@ async function patchGlobalEntryOptionsOnce(
       if (
         errors.length ||
         !isPlainObject(parsed) ||
-        !Array.isArray(parsed.plugin)
+        !Array.isArray(parsed.plugins)
       )
         return "corrupt"
       const dir = path.dirname(winner)
       let index = -1
       let bare = false
       let options: unknown
-      for (let i = 0; i < parsed.plugin.length; i++) {
-        const entry: unknown = parsed.plugin[i]
+      for (let i = 0; i < parsed.plugins.length; i++) {
+        const entry: unknown = parsed.plugins[i]
         const spec =
           typeof entry === "string"
             ? entry
-            : Array.isArray(entry) && typeof entry[0] === "string"
-              ? entry[0]
+            : isPlainObject(entry) && typeof entry.package === "string"
+              ? entry.package
               : undefined
         if (spec === undefined) return "corrupt"
         if (
@@ -1214,28 +1217,33 @@ async function patchGlobalEntryOptionsOnce(
         ) {
           index = i
           bare = typeof entry === "string"
-          options = Array.isArray(entry) ? entry[1] : undefined
+          options = isPlainObject(entry) ? entry.options : undefined
         }
       }
       if (index < 0) return "no-entry"
       const formatting = { insertSpaces: true, tabSize: 2 }
       if (bare) {
-        const spec = parsed.plugin[index] as string
+        const spec = parsed.plugins[index] as string
         const next = literalRecord<unknown>()
         for (const [key, value] of Object.entries(patch))
           if (value !== undefined) next[key] = value
         text = applyJsoncEdits(
           text,
-          modifyJsonc(text, ["plugin", index], [spec, next], {
-            formattingOptions: formatting,
-          }),
+          modifyJsonc(
+            text,
+            ["plugins", index],
+            { package: spec, options: next },
+            {
+              formattingOptions: formatting,
+            },
+          ),
         )
       } else {
         if (options !== undefined && !isPlainObject(options)) return "corrupt"
         for (const [key, value] of Object.entries(patch))
           text = applyJsoncEdits(
             text,
-            modifyJsonc(text, ["plugin", index, 1, key], value, {
+            modifyJsonc(text, ["plugins", index, "options", key], value, {
               formattingOptions: formatting,
             }),
           )

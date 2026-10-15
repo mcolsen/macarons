@@ -187,12 +187,14 @@ export const TOOL_CATALOG: Record<string, string> = {
   grep: "read-only file-content search; the pattern is the regular expression searched for. metadata.path, when present, is the directory searched — outside the project it additionally requires external_directory approval.",
   list: "read-only directory listing inside the project.",
   edit: 'creates or modifies a file (raised by the edit, write, and apply_patch tools); the pattern is the worktree-relative file path — "../" segments or an absolute path mean the write lands OUTSIDE the project. An outside path additionally requires a separate external_directory permission, but this edit request still decides the actual file change.',
-  bash: 'runs a shell command on the user\'s machine; patterns are the parsed command heads, and metadata.command is the full command line. Judge the full invocation, not the executable name. Task-related tooling, local development service/database operations, and ordinary client authentication follow the development-work rules in the system policy. Routine project-scoped tooling such as npx prettier is medium risk even if the runner fetches the package and writes its normal cache; hypothetical supply-chain compromise alone is not grounds to surface. Package sources, arguments, extra plugins, and chained commands still matter. curl is not intrinsically exfiltration; distinguish routine development traffic from private-data uploads, production/shared mutations, secret disclosure, and ad hoc downloaded-code execution. Piping content downloaded by curl directly to a shell or interpreter, including "curl ... | sh", is always critical.',
+  shell:
+    'runs a shell command on the user\'s machine; patterns are the parsed command heads, and metadata.command is the full command line. Judge the full invocation, not the executable name. Task-related tooling, local development service/database operations, and ordinary client authentication follow the development-work rules in the system policy. Routine project-scoped tooling such as npx prettier is medium risk even if the runner fetches the package and writes its normal cache; hypothetical supply-chain compromise alone is not grounds to surface. Package sources, arguments, extra plugins, and chained commands still matter. curl is not intrinsically exfiltration; distinguish routine development traffic from private-data uploads, production/shared mutations, secret disclosure, and ad hoc downloaded-code execution. Piping content downloaded by curl directly to a shell or interpreter, including "curl ... | sh", is always critical.',
   webfetch:
     "fetches the visible URL without modifying remote state; the pattern is the URL. An ordinary public URL fetch is a medium-risk network read, not exfiltration by itself. Raise the risk when the URL contains secrets or dynamically incorporates private/local data.",
   websearch:
     "performs a web search; the pattern is the exact query sent as the operation's intended input. An ordinary task-relevant query is a medium-risk network read, not exfiltration by itself. Raise the risk when the query contains secrets or private/local data.",
-  task: "spawns a sub-agent that works autonomously toward a described goal; the pattern is the name of the agent type being launched.",
+  subagent:
+    "spawns a sub-agent that works autonomously toward a described goal; the pattern is the name of the agent type being launched.",
   skill:
     "loads a skill's instructions into the agent's context; the pattern is the skill name.",
   lsp: "queries the language server for read-only code intelligence (definitions, references, diagnostics).",
@@ -204,6 +206,10 @@ export const TOOL_CATALOG: Record<string, string> = {
   doom_loop:
     "raised by the host itself after the agent repeated the exact same tool call many times in a row; approving lets the loop continue. The user usually needs to see this.",
 }
+
+// Retain descriptions when inspecting pre-V2 journals and imported requests.
+TOOL_CATALOG.bash = TOOL_CATALOG.shell ?? "runs a shell command"
+TOOL_CATALOG.task = TOOL_CATALOG.subagent ?? "starts a subagent"
 
 const UNKNOWN_TOOL_DESCRIPTION =
   "not in the built-in catalog (a third-party or newer tool); judge only from the name, the patterns and metadata, and the current call arguments when shown, and prefer to surface if its effects are unclear."

@@ -1,5 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises"
 import { MAX_TIMER_MS, withTimeout } from "@macarons/permission-rules"
+import type { Plugin } from "@opencode/plugin"
 import {
   AUTHORIZATION_LEVELS,
   CLASSIFIER_POLICY_PROMPT,
@@ -151,10 +152,11 @@ export function parseJevVerdict(
 export async function classifyWithJev(
   request: ClassifierRequest,
   signal: AbortSignal,
+  integration?: Plugin.Context["integration"],
 ): Promise<Verdict | undefined> {
   return withTimeout(
     async (signal) => {
-      const apiKey = await readJevApiKey()
+      const apiKey = await readJevApiKey(undefined, integration)
       signal.throwIfAborted()
       if (!apiKey) throw new SafeCauseError(JEV_AUTH_HINT)
       const body = JSON.stringify(jevRequest(request))

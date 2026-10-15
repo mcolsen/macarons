@@ -1,13 +1,12 @@
 import { describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import path from "node:path"
-import { describePackaging } from "@macarons/plugin-test-harness"
+import plugin from "../index"
 
 const ROOT = path.join(import.meta.dir, "..")
 
-describePackaging({
-  testDir: import.meta.dir,
-  serverExport: "RedactSecretsPlugin",
+test("directory entry exports the native plugin", () => {
+  expect(plugin.id).toBe("macarons.redact-secrets")
 })
 
 describe("vendored betterleaks rules ship with their provenance", () => {
@@ -15,7 +14,7 @@ describe("vendored betterleaks rules ship with their provenance", () => {
     const pkg = JSON.parse(
       await fs.readFile(path.join(ROOT, "package.json"), "utf8"),
     ) as { files?: string[] }
-    expect(pkg.files).toEqual(["LICENSE", "src", "vendor"])
+    expect(pkg.files).toEqual(["LICENSE", "index.ts", "src", "vendor"])
     for (const file of [
       "vendor/betterleaks/LICENSE",
       "vendor/betterleaks/PROVENANCE.md",

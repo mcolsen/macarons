@@ -1,5 +1,4 @@
 import { createHash, createHmac } from "node:crypto"
-import { authEntry } from "@macarons/permission-rules"
 import {
   decodePayloadBytes,
   isOpaqueBinaryPayload,
@@ -18,15 +17,6 @@ import type { Finding } from "./engine/types"
  * and restoration, plugin option parsing, and the request-body rewrite the
  * wire backstop applies.
  */
-
-// The verified band is centralized in the shared library and rides the repo's
-// OpenCode pin (.opencode-version) — the policy comment lives there. The host
-// surfaces this package leans on: the experimental chat transform hooks and
-// the text.complete write-back.
-export {
-  openCodeCompatNotice,
-  SUPPORTED_OPENCODE_RANGE,
-} from "@macarons/permission-rules"
 
 // ---- placeholders -----------------------------------------------------------
 
@@ -183,182 +173,28 @@ export { isOpaqueBinaryPayload, percentDecodeTolerant } from "./dataurl"
 // ---- options ------------------------------------------------------------------
 
 export type RedactOptions = {
-  /** Rule ids to skip during scanning. */
   readonly disabledRules: ReadonlySet<string>
-  /** Append the placeholder explanation to the system prompt. Default true. */
   readonly systemNote: boolean
-  /**
-   * Restore restart-safe placeholders in completed assistant text parts.
-   * Default true.
-   * Disabling keeps placeholders in ALL stored assistant text — compaction
-   * summaries included, since they stream through the same hook. That is the
-   * point of the option (no raw value is ever written back into the stored
-   * transcript), but it carries a documented cost: once compaction drops the
-   * transcript's raw copies and the process restarts, a placeholder can only
-   * be resolved by fingerprint recovery (shell env + project env files); a
-   * secret absent from those reaches its tool call as a literal placeholder.
-   * index.ts warns at startup when this is off.
-   */
-  readonly restoreText: boolean
-  /**
-   * Never re-redact an outbound surface this session already sent (HistoryPins).
-   * Default true. Turning it off restores retroactive redaction — a secret
-   * first recognized at turn N is masked in the replayed turns 1..N-1 too — at
-   * the cost of resetting the provider's prompt cache on the request that
-   * learns it, and on every later request that learns another.
-   */
-  readonly stableHistory: boolean
-  /** Install the wire-level fetch backstop on safely wrappable providers. Default true. */
-  readonly wireBackstop: boolean
-  /** Provider ids the wire backstop must leave alone, in addition to built-in exclusions. */
-  readonly wireSkipProviders: ReadonlySet<string>
 }
 
 export const DEFAULT_OPTIONS: RedactOptions = {
   disabledRules: new Set(),
   systemNote: true,
-  restoreText: true,
-  stableHistory: true,
-  wireBackstop: true,
-  wireSkipProviders: new Set(),
 }
 
 export function parseOptions(raw: unknown): RedactOptions {
   if (!raw || typeof raw !== "object") return DEFAULT_OPTIONS
   const record = raw as Record<string, unknown>
-  const strings = (value: unknown): string[] =>
-    Array.isArray(value)
-      ? value.filter((item): item is string => typeof item === "string")
-      : []
   return {
-    disabledRules: new Set(strings(record.disabledRules)),
+    disabledRules: new Set(
+      Array.isArray(record.disabledRules)
+        ? record.disabledRules.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : [],
+    ),
     systemNote: record.systemNote !== false,
-    restoreText: record.restoreText !== false,
-    stableHistory: record.stableHistory !== false,
-    wireBackstop: record.wireBackstop !== false,
-    wireSkipProviders: new Set(strings(record.wireSkipProviders)),
   }
-}
-
-/**
- * Mirrors the host's runtime-flag parsing (Effect Config.Boolean, verified in
- * effect 4.0.0-beta.83): exactly "true" | "yes" | "on" | "1" | "y" enable a
- * flag. Anything else reads as disabled — other casings or junk values are a
- * host startup error, so they never reach a running plugin anyway.
- */
-export function runtimeFlagEnabled(value: unknown): boolean {
-  return (
-    value === "true" ||
-    value === "yes" ||
-    value === "on" ||
-    value === "1" ||
-    value === "y"
-  )
-}
-
-/** Whether the auth store holds an entry (of any type) for `providerID`. */
-export function hasAuthEntry(authJson: unknown, providerID: string): boolean {
-  return authEntry(authJson, providerID) !== undefined
-}
-
-// The host's `Auth.Info` decode — the filter this plugin applies to the
-// auth.json FILE path, and never to the inline override — was the one piece of
-// the suite's three auth readers this plugin owned outright (audit §2.3). It
-// lives in the library now, next to the reader that applies it; re-exported so
-// the wire-backstop policy below keeps reading as one module.
-export {
-  type AuthType,
-  validAuthType,
-  validatedAuthStore,
-} from "@macarons/permission-rules"
-
-/**
- * Provider ids the wire backstop must never wrap, because the host installs
- * its own `options.fetch` for them at provider-assembly time — AFTER the
- * plugin config hook ran — and the final config re-apply
- * (provider.ts:1571-1577) would clobber it with ours:
- *
- *   - github-copilot: OAuth auth-plugin loader installs a token fetch.
- *   - google-vertex: the custom loader installs an ADC-token fetch whenever
- *     a GCP project is resolvable (provider.ts:530-541); losing it strips
- *     Authorization from every Vertex request.
- *   - snowflake-cortex: the custom loader installs a request/response
- *     transformation fetch for env/config/api-key tokens
- *     (provider.ts:902-955).
- */
-export const FETCH_OWNING_PROVIDERS: ReadonlySet<string> = new Set([
-  "github-copilot",
-  "google-vertex",
-  "snowflake-cortex",
-])
-
-/**
- * Provider ids whose auth entry means another fetch is (or may be) installed
- * by an internal auth-plugin loader; overwriting it via config options would
- * break their authentication, so the wire backstop must skip them. The
- * OAuth rule is generic on purpose: every internal loader that installs a
- * fetch does so for oauth-type auth (verified across plugin/*.ts at
- * 1.17.18), and a third-party auth plugin is most likely to follow the same
- * shape.
- */
-export function unsafeWireProviders(authJson: unknown): Set<string> {
-  const unsafe = new Set<string>(FETCH_OWNING_PROVIDERS)
-  if (authJson && typeof authJson === "object") {
-    for (const [providerID, entry] of Object.entries(
-      authJson as Record<string, unknown>,
-    )) {
-      const type =
-        entry && typeof entry === "object"
-          ? (entry as { type?: unknown }).type
-          : undefined
-      if (type === "oauth") unsafe.add(providerID)
-    }
-  }
-  return unsafe
-}
-
-/**
- * Provider ids that are provably active on the host WITHOUT an entry in
- * config.provider, derived exactly the way the host activates them
- * (provider.ts:1506-1530): a models.dev catalog provider whose env key is
- * set ("load env"), or one holding an api-key auth entry ("load apikeys").
- * These are the providers the wire backstop must create a config entry for —
- * their requests (title generation above all) otherwise leave with no fetch
- * wrapper at all. Catalog membership is required on both paths: the host
- * ignores env keys and api auth for unknown providers, and a config entry
- * for an unknown id would conjure a phantom selector entry.
- *
- * `catalogJson` is the parsed models.dev snapshot (Record<id, {env: [...]}>).
- * Only `type: "api"` auth entries count: `oauth` activates through plugin
- * auth loaders (never safe to wrap anyway) and `wellknown` activates nothing.
- */
-export function catalogWireCandidates(
-  catalogJson: unknown,
-  env: Record<string, string | undefined>,
-  authJson: unknown,
-): Set<string> {
-  const candidates = new Set<string>()
-  if (!catalogJson || typeof catalogJson !== "object") return candidates
-  const catalog = catalogJson as Record<string, unknown>
-  for (const [providerID, entry] of Object.entries(catalog)) {
-    if (!entry || typeof entry !== "object") continue
-    const envKeys = (entry as { env?: unknown }).env
-    if (!Array.isArray(envKeys)) continue
-    if (envKeys.some((key) => typeof key === "string" && env[key]))
-      candidates.add(providerID)
-  }
-  if (authJson && typeof authJson === "object") {
-    for (const [providerID, entry] of Object.entries(
-      authJson as Record<string, unknown>,
-    )) {
-      const type =
-        entry && typeof entry === "object"
-          ? (entry as { type?: unknown }).type
-          : undefined
-      if (type === "api" && providerID in catalog) candidates.add(providerID)
-    }
-  }
-  return candidates
 }
 
 // ---- the redactor ---------------------------------------------------------------
@@ -1703,7 +1539,8 @@ export class Redactor {
         // magic-confirmed; a remote http(s) url is scanned whole. Only
         // genuinely opaque bytes (a magic-confirmed binary data: payload, a
         // file: path) survive untouched.
-        if (typeof value === "string") record[key] = this.redactPartUrl(value)
+        if (typeof value === "string")
+          record[key] = this.redactAttachmentUrl(value)
         continue
       }
       if (PART_STRUCTURAL_KEYS.has(key)) continue
@@ -1834,7 +1671,7 @@ export class Redactor {
    * (scheme + scanned-mediatype + base64 marker + "," + payload reconstructs the
    * original), so a request without a secret is never altered.
    */
-  private redactPartUrl(url: string): string {
+  redactAttachmentUrl(url: string): string {
     if (/^\s*file:/i.test(url)) return url
     const data = parseDataUrl(url)
     if (!data) return this.redactRemoteUrl(url)

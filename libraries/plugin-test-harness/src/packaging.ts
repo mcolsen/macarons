@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
-import { OPENCODE_ENGINE_RANGE } from "@macarons/permission-rules"
 
 /**
  * The shared packaging skeleton (2026-07-23 audit §3, issue #116). Guards the
@@ -148,12 +147,12 @@ export function describePackaging(options: PackagingOptions): void {
       })
     }
 
-    test("engines declares the static v1 install gate", async () => {
+    test("engines declares the native v2 install gate", async () => {
       // Pinned to the shared constant so the band never drifts for one plugin
       // alone; the nightly bump job deliberately leaves engines untouched, so
       // any divergence here is a hand edit that nothing else would catch.
       expect((await readPackageJson()).engines?.opencode).toBe(
-        OPENCODE_ENGINE_RANGE,
+        ">=2.0.29 <3.0.0",
       )
     })
 
@@ -162,7 +161,6 @@ export function describePackaging(options: PackagingOptions): void {
       // install gets no devDependencies: every value-imported bare specifier
       // held as a devDependency is an unresolvable specifier at plugin load.
       const pkg = await readPackageJson()
-      expect(pkg.dependencies?.["@macarons/permission-rules"]).toBeDefined()
       for (const dep of options.runtimeDeps ?? []) {
         expect({ dep, runtime: pkg.dependencies?.[dep] !== undefined }).toEqual(
           { dep, runtime: true },
@@ -195,23 +193,24 @@ export function describePackaging(options: PackagingOptions): void {
   })
 
   if (hasServer) {
-    describe("server entry satisfies the legacy server-loader contract", () => {
-      test("every export is a function and there is no default export", async () => {
-        // Imported through the declared target rather than a hardcoded
-        // ../src/index so the module under test is the one installs resolve.
+    describe("server entry satisfies the native v2 loader contract", () => {
+      test("default export is a plugin definition with setup", async () => {
         const mod = (await import(
           pathToFileURL(await exportTarget("./server")).href
         )) as Record<string, unknown>
-        expect("default" in mod).toBe(false)
-        expect(Object.keys(mod)).toEqual([options.serverExport as string])
-        expect(typeof mod[options.serverExport as string]).toBe("function")
+        const definition = mod.default as
+          | { id?: unknown; setup?: unknown }
+          | undefined
+        expect(typeof definition?.id).toBe("string")
+        expect(typeof definition?.setup).toBe("function")
+        expect(mod[options.serverExport as string]).toBe(definition)
       })
     })
   }
 
   if (hasTui) {
     describe("tui entry satisfies the TUI-loader contract", () => {
-      test("default export is { id, tui } and never carries server()", async () => {
+      test("default export is a native { id, setup } definition", async () => {
         const mod = (await import(
           pathToFileURL(await exportTarget("./tui")).href
         )) as { default?: Record<string, unknown> }
@@ -220,7 +219,7 @@ export function describePackaging(options: PackagingOptions): void {
         if (!plugin) throw new Error("Missing default TUI plugin export")
         expect(typeof plugin.id).toBe("string")
         expect((plugin.id as string).length).toBeGreaterThan(0)
-        expect(typeof plugin.tui).toBe("function")
+        expect(typeof plugin.setup).toBe("function")
         expect("server" in plugin).toBe(false)
       })
     })

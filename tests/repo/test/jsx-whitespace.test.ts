@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import path from "node:path"
 import ts from "@typescript/typescript6"
 
@@ -32,12 +32,18 @@ import ts from "@typescript/typescript6"
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..", "..")
 
 function trackedTsxFiles(): string[] {
-  const out = execFileSync("git", ["ls-files", "*.tsx"], {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-    maxBuffer: 8 * 1024 * 1024,
-  })
-  return out.split("\n").filter(Boolean)
+  const out = execFileSync(
+    "git",
+    ["ls-files", "--cached", "--others", "--exclude-standard", "*.tsx"],
+    {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      maxBuffer: 8 * 1024 * 1024,
+    },
+  )
+  return out
+    .split("\n")
+    .filter((file) => file && existsSync(path.join(REPO_ROOT, file)))
 }
 
 /**

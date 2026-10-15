@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { builtinModules } from "node:module"
 import path from "node:path"
 import ts from "@typescript/typescript6"
@@ -9,7 +9,7 @@ import ts from "@typescript/typescript6"
  * The installer loads plugin `src` directly — `pathToFileURL(serverEntry)` into
  * this checkout — so a runtime VALUE import of a bare specifier must be a real
  * `dependency`, not a `devDependency` that a consumer install drops. That trap
- * already bit cron: `import { tool } from "@opencode-ai/plugin"` with the
+ * already bit cron: `import { tool } from "@opencode/plugin"` with the
  * package in devDependencies loads fine under workspace hoisting (unit tests,
  * typecheck, and the cron e2e all stay green) and fails only on a real
  * `opencode plugin install`. It is pinned per-plugin in each packaging.test.ts;
@@ -20,11 +20,11 @@ import ts from "@typescript/typescript6"
  * runtime dependency and may stay in devDependencies. Host-provided peers the
  * OpenCode runtime injects into a plugin's module scope are exempt from the
  * dependency requirement:
- *   - any `@opencode-ai/*` specifier EXCEPT the bare `@opencode-ai/plugin`
- *     (so `@opencode-ai/plugin/tui`, `@opencode-ai/sdk[/…]` are exempt), plus
+ *   - any `@opencode-ai/*` specifier EXCEPT the bare `@opencode/plugin`
+ *     (so `@opencode/plugin/tui`, `@opencode/client[/…]` are exempt), plus
  *     the TUI render runtime `solid-js` / `@opentui/*` — every TUI half
  *     value-imports these and keeps them in devDependencies, uniformly.
- * The bare `@opencode-ai/plugin` specifier is NOT exempt: it is the server-half
+ * The bare `@opencode/plugin` specifier is NOT exempt: it is the server-half
  * import the installer's load path cannot resolve from devDependencies, and the
  * one cron got wrong.
  */
@@ -38,7 +38,13 @@ function gitLsFiles(...patterns: string[]): string[] {
   // as a top-level package.
   return execFileSync(
     "git",
-    ["ls-files", ...patterns.map((p) => `:(glob)${p}`)],
+    [
+      "ls-files",
+      "--cached",
+      "--others",
+      "--exclude-standard",
+      ...patterns.map((p) => `:(glob)${p}`),
+    ],
     {
       cwd: REPO_ROOT,
       encoding: "utf8",
@@ -46,7 +52,7 @@ function gitLsFiles(...patterns: string[]): string[] {
     },
   )
     .split("\n")
-    .filter(Boolean)
+    .filter((file) => file && existsSync(path.join(REPO_ROOT, file)))
 }
 
 function packageNameOf(specifier: string): string {
@@ -57,12 +63,12 @@ function packageNameOf(specifier: string): string {
 
 /**
  * Packages the OpenCode host injects at load time, so a plugin may keep them in
- * devDependencies. `@opencode-ai/plugin` bare is deliberately excluded — the
+ * devDependencies. `@opencode/plugin` bare is deliberately excluded — the
  * server-load path must resolve it from the plugin's own dependencies.
  */
 function isHostProvided(specifier: string, pkg: string): boolean {
   if (pkg === "solid-js" || pkg.startsWith("@opentui/")) return true
-  return pkg.startsWith("@opencode-ai/") && specifier !== "@opencode-ai/plugin"
+  return specifier === "@opencode/plugin/tui"
 }
 
 /** True when the import statement introduces at least one runtime binding. */
@@ -156,7 +162,7 @@ describe("runtime value imports are declared as real dependencies", () => {
     // turns on — cron's server-half `tool` import and its third-party croner.
     expect(requirements.length).toBeGreaterThanOrEqual(8)
     const cron = requirements.filter((r) => r.dir === "cron").map((r) => r.pkg)
-    expect(cron).toContain("@opencode-ai/plugin")
+    expect(cron).toContain("@opencode/plugin")
     expect(cron).toContain("croner")
   })
 

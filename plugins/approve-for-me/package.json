@@ -1,7 +1,7 @@
 {
   "name": "@macarons/approve-for-me",
-  "version": "0.1.0",
-  "description": "OpenCode plugin that auto-approves permission prompts a user-chosen classifier model judges safe, surfacing everything else — like Codex's \"Approve for me\"",
+  "version": "0.2.0",
+  "description": "OpenCode v2 model-based review of eligible low and medium risk permission requests with guarded local controls",
   "type": "module",
   "main": "./src/index.ts",
   "exports": {
@@ -13,6 +13,8 @@
   },
   "files": [
     "LICENSE",
+    "index.ts",
+    "tui.tsx",
     "src",
     "skills"
   ],
@@ -23,11 +25,13 @@
     "typecheck": "tsc --noEmit"
   },
   "engines": {
-    "opencode": ">=1.17.14 <2.0.0"
+    "opencode": ">=2.0.29 <3.0.0"
   },
   "dependencies": {
     "@macarons/permission-rules": "workspace:*",
-    "jsonc-parser": "^3.3.1"
+    "jsonc-parser": "^3.3.1",
+    "@opencode/plugin": "2.0.29",
+    "effect": "4.0.1"
   },
   "keywords": [
     "opencode",
@@ -38,14 +42,14 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
     "@macarons/plugin-test-harness": "workspace:*",
-    "@opencode-ai/plugin": "1.18.14",
-    "@opencode-ai/sdk": "1.18.14",
-    "@opentui/core": "0.5.12",
-    "@opentui/keymap": "0.5.12",
-    "@opentui/solid": "0.5.12",
+    "@opentui/core": "0.5.17",
+    "@opentui/keymap": "0.5.17",
+    "@opentui/solid": "0.5.17",
     "@types/bun": "^1.4.2",
     "@types/node": "^26.6.2",
     "solid-js": "1.9.15",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "@opencode/client": "2.0.29",
+    "@opencode/theme": "2.0.29"
   }
 }

@@ -1,20 +1,7 @@
-import {
-  appLogger,
-  createSerialQueue,
-  createSessionActivityTracker,
-  mintMessageID,
-  type PromptIdentity,
-  promptIdentityBody,
-  reportServerCompat,
-  SESSION_STATUS_PROBE_TIMEOUT_MS,
-  serverToast,
-  sessionPromptIdentity,
-  trim,
-  truncateLabel,
-  unrefTimer,
-  withTimeout,
-} from "@macarons/permission-rules"
-import { type Plugin, tool } from "@opencode-ai/plugin"
+import { randomUUID } from "node:crypto"
+import { unrefTimer } from "@macarons/permission-rules"
+import { Plugin } from "@opencode/plugin"
+import { Schema } from "effect"
 import {
   type CronJob,
   createScheduler,
@@ -25,34 +12,6 @@ import {
   type Scheduler,
   validateCron,
 } from "./scheduler"
-
-/**
- * @macarons/cron — plugin factory
- *
- * Gives the OpenCode agent Claude Code's cron tools: cron_create, cron_list,
- * cron_delete. A fired job's prompt is enqueued into the owning session as an
- * ordinary user turn via session.promptAsync — but only while that session is
- * idle; fires that land mid-turn wait for the next idle and coalesce. Whether
- * a session is idle comes from the suite's shared tracker
- * (createSessionActivityTracker in permission-rules): session.status /
- * session.idle events, a one-shot GET /session/status for a session no event
- * has described yet, and not-idle whenever the answer is unknown. The holding
- * and coalescing on top of that answer is this plugin's own (src/scheduler.ts).
- *
- * Jobs created by a sub-agent attach to its top-level session (parentID chain
- * walked via session.get): child sessions are hidden from the switcher and
- * end with their task, so a prompt fired into one would never be seen. The
- * walk fails closed — an unconfirmed link aborts the tool call rather than
- * guessing at (and caching) the wrong owner.
- *
- * Everything goes through the injected v1 client — never fetch(serverUrl) —
- * so the standalone TUI's in-process transport works identically to serve
- * mode. The timer functions and delivery deadline are injectable purely for
- * tests; src/index.ts exports the real-clock instance and nothing else,
- * because the host calls every function a plugin module exports.
- */
-
-const SERVICE = "cron"
 
 const CREATE_DESCRIPTION = `Schedule a prompt to be enqueued in this session at a future time. Use for both recurring schedules and one-shot reminders.
 
@@ -100,19 +59,18 @@ export type TimerDeps = {
 
 const REAL_TIMERS: TimerDeps = {
   now: () => Date.now(),
-  // Unref'd like every other timer in the suite. A cron arm is a pending
-  // *notification*, not a reason for the OpenCode server to stay up: the
-  // listening socket is what keeps that process alive, and a job armed for
-  // next Tuesday must not outvote a shutdown.
   setTimer: (run, delayMs) => unrefTimer(setTimeout(run, delayMs)),
   clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
 }
+
+export const DELIVERY_CALL_TIMEOUT_MS = 10_000
+export const IDLE_RECHECK_MS = 10_000
 
 const PROMPT_PREVIEW_CHARS = 60
 
 /** One line of a job's prompt for a listing row or a toast. */
 function preview(text: string): string {
-  return truncateLabel(text, PROMPT_PREVIEW_CHARS)
+  return text.replace(/\s+/g, " ").slice(0, PROMPT_PREVIEW_CHARS)
 }
 
 function local(ms: number): string {
@@ -139,672 +97,341 @@ function formatJob(job: CronJob): string {
   return `- ${job.id}: "${job.cron}" (${kind}) — ${when}${expiry} — prompt: ${preview(job.prompt)}`
 }
 
-// Pauses between the message lookups that prove a fire was accepted, after the
-// immediate first lookup. Bounded: a prompt that never appears parks the job
-// as ambiguous instead of blocking the scheduler forever.
-export const CONFIRM_DELAYS_MS = [200, 500, 1000, 2000]
-
-// A transiently loaded host must not permanently park a recurring schedule
-// merely because its forked prompt write missed the terminal-fire budget.
-// Keeping the extension non-final avoids adding twelve seconds to one-shots.
-export const NON_FINAL_CONFIRM_DELAYS_MS = [...CONFIRM_DELAYS_MS, 4000, 8000]
-
-// Every host request on the fire path gets an aborting deadline. The status
-// probe already uses this suite-wide bound; sharing it keeps one definition of
-// how long a loopback host call may hold a cron delivery.
-export const DELIVERY_CALL_TIMEOUT_MS = SESSION_STATUS_PROBE_TIMEOUT_MS
-
-// A confirmed message normally starts a turn immediately. If it was stored but
-// the fork died before publishing any status transition, re-check live host
-// state after this grace period so later same-session fires are not stranded.
-export const AWAIT_IDLE_RECHECK_MS = SESSION_STATUS_PROBE_TIMEOUT_MS
-
+/** Native V2 plugin: the host durably admits queued inputs before acknowledging them. */
 export function cronPlugin(
   timers: TimerDeps = REAL_TIMERS,
   deliveryCallTimeoutMs = DELIVERY_CALL_TIMEOUT_MS,
-): Plugin {
-  return async ({ client, directory, serverUrl }) => {
-    const log = appLogger(client, SERVICE)
+): Plugin.Plugin {
+  return Plugin.define({
+    id: "macarons.cron",
+    async setup(context) {
+      const lifecycle = new AbortController()
+      const retries = new Map<string, unknown>()
+      const lanes = new Map<string, Promise<unknown>>()
+      let scheduler: Scheduler
 
-    const compat = await reportServerCompat({
-      client,
-      serverUrl,
-      label: SERVICE,
-      service: SERVICE,
-      log,
-    })
-    // Only a non-v1 host is disabling; a merely untested v1 host runs on.
-    if (compat?.disable) return {}
-
-    // ---- session busy/idle tracking -----------------------------------------
-
-    /** Aborted by dispose() so no status or delivery request outlives the plugin. */
-    const disposeSignal = new AbortController()
-
-    // Busy/idle from session.status / session.idle, with a one-shot
-    // GET /session/status for a session no event has described yet and
-    // not-idle whenever the answer is unknown. The tracker reports state; what
-    // this plugin does with it — hold the fire, coalesce the repeats, deliver
-    // on the next idle — is the scheduler's, below.
-    const activity = createSessionActivityTracker({
-      client,
-      directory,
-      timeoutMs: deliveryCallTimeoutMs,
-      signal: disposeSignal.signal,
-    })
-
-    // ---- root-session resolution --------------------------------------------
-
-    // Only CONFIRMED walks are cached. A transient failure must never decide
-    // job ownership: guessing "current session is the root" on an error and
-    // caching it would permanently attach a sub-agent's jobs to a session
-    // that ends with its task — fires delivered where nobody looks, and
-    // cron_list/cron_delete from the real root blind to the job. Like the
-    // equivalent walk in subagent-comms, every unconfirmed link fails closed.
-
-    const roots = new Map<string, string>()
-
-    const MAX_ANCESTRY_DEPTH = 16
-
-    const unresolvedAncestry = (sessionID: string, reason: string): string =>
-      `Could not resolve this session's top-level session (stopped at ${JSON.stringify(sessionID)}: ${reason}). Nothing was changed — retry when the host answers again.`
-
-    const rootSessionOf = async (sessionID: string): Promise<string> => {
-      const cached = roots.get(sessionID)
-      if (cached) return cached
-      const visited = [sessionID]
-      let current = sessionID
-      for (let depth = 0; depth < MAX_ANCESTRY_DEPTH; depth++) {
-        let result: { data?: unknown; error?: unknown }
+      // Keep all remote operations bounded, even when a transport ignores abort.
+      async function bounded<T>(
+        call: (signal: AbortSignal) => Promise<T>,
+      ): Promise<T> {
+        const abort = new AbortController()
+        const stop = () => abort.abort(lifecycle.signal.reason)
+        lifecycle.signal.addEventListener("abort", stop, { once: true })
+        let timer: ReturnType<typeof setTimeout> | undefined
+        let onAbort: (() => void) | undefined
         try {
-          result = await client.session.get({
-            path: { id: current },
-            query: { directory },
-          })
-        } catch (error) {
-          throw new Error(
-            unresolvedAncestry(
-              current,
-              `session.get failed: ${error instanceof Error ? error.message : String(error)}`,
-            ),
-          )
-        }
-        if (result.error) {
-          throw new Error(
-            unresolvedAncestry(
-              current,
-              `the host answered with an error: ${JSON.stringify(result.error)}`,
-            ),
-          )
-        }
-        const info = result.data as { parentID?: unknown } | undefined | null
-        if (!info || typeof info !== "object") {
-          throw new Error(
-            unresolvedAncestry(current, "the host returned no session data"),
-          )
-        }
-        const parentID = info.parentID
-        if (parentID === undefined || parentID === null || parentID === "") {
-          // Confirmed root: cache every hop of the walk.
-          for (const id of visited) roots.set(id, current)
-          trim(roots)
-          return current
-        }
-        if (typeof parentID !== "string") {
-          throw new Error(
-            unresolvedAncestry(current, "the session's parentID is malformed"),
-          )
-        }
-        current = parentID
-        visited.push(current)
-      }
-      throw new Error(
-        unresolvedAncestry(
-          current,
-          `the parent chain is deeper than ${MAX_ANCESTRY_DEPTH} sessions`,
-        ),
-      )
-    }
-
-    // ---- delivery ------------------------------------------------------------
-
-    // No TUI attached just means nobody is watching; the fire is in the log.
-    const toast = serverToast(client, { directory })
-
-    const delivered = (job: CronJob, how: string) => {
-      log("info", `job ${job.id} fired into session ${job.sessionID}${how}`)
-      toast("info", `cron: ${job.id} fired — ${preview(job.prompt)}`)
-    }
-
-    type DeliveryLane = {
-      queue: ReturnType<typeof createSerialQueue>
-      pending: number
-    }
-    type AwaitingIdleMark = {
-      recheckAt: number
-      timer?: unknown
-    }
-    const deliveryLanes = new Map<string, DeliveryLane>()
-    const idleEpochs = new Map<string, number>()
-    const awaitingIdle = new Map<string, AwaitingIdleMark>()
-    const suppressLegacyIdle = new Set<string>()
-    let scheduler: Scheduler
-
-    // OpenCode orders a session's messages by ID. Keep prompt submission and
-    // exact-ID confirmation serial within that session so concurrent cron jobs
-    // cannot persist out of order; other sessions retain independent lanes.
-    const inDeliveryLane = <T>(
-      sessionID: string,
-      work: () => Promise<T>,
-    ): Promise<T> => {
-      const lane = deliveryLanes.get(sessionID) ?? {
-        queue: createSerialQueue(),
-        pending: 0,
-      }
-      deliveryLanes.set(sessionID, lane)
-      lane.pending++
-      return lane.queue.push(work).finally(() => {
-        lane.pending--
-        if (lane.pending === 0 && deliveryLanes.get(sessionID) === lane) {
-          deliveryLanes.delete(sessionID)
-        }
-      })
-    }
-
-    const withDeliveryTimeout = <T>(
-      description: string,
-      call: (signal: AbortSignal) => Promise<T>,
-    ): Promise<T> =>
-      withTimeout(call, deliveryCallTimeoutMs, {
-        signal: disposeSignal.signal,
-        message: `${description} timed out after ${deliveryCallTimeoutMs} ms`,
-      })
-
-    const clearAwaitingIdle = (sessionID: string): void => {
-      const mark = awaitingIdle.get(sessionID)
-      if (!mark) return
-      if (mark.timer !== undefined) timers.clearTimer(mark.timer)
-      awaitingIdle.delete(sessionID)
-    }
-
-    // The cached idle that preceded a cron prompt cannot prove that its fork
-    // has finished. Refresh through the shared tracker, which also lets an
-    // event racing the request override the endpoint's older snapshot.
-    const isDefinitelyIdleNow = (sessionID: string): Promise<boolean> =>
-      activity.isIdle(sessionID, { refresh: true })
-
-    const scheduleAwaitingIdleRecheck = (
-      sessionID: string,
-      mark: AwaitingIdleMark,
-    ): void => {
-      if (mark.timer !== undefined) return
-      mark.timer = timers.setTimer(
-        () => {
-          mark.timer = undefined
-          void (async () => {
-            const idle = await isDefinitelyIdleNow(sessionID)
-            if (
-              disposeSignal.signal.aborted ||
-              awaitingIdle.get(sessionID) !== mark
-            ) {
-              return
-            }
-            if (!idle) {
-              mark.recheckAt = timers.now() + AWAIT_IDLE_RECHECK_MS
-              scheduleAwaitingIdleRecheck(sessionID, mark)
-              return
-            }
-            clearAwaitingIdle(sessionID)
-            idleEpochs.set(sessionID, (idleEpochs.get(sessionID) ?? 0) + 1)
-            trim(idleEpochs)
-            scheduler.onSessionIdle(sessionID)
-          })()
-        },
-        Math.max(mark.recheckAt - timers.now(), 0),
-      )
-    }
-
-    const markAwaitingIdle = (sessionID: string): void => {
-      clearAwaitingIdle(sessionID)
-      awaitingIdle.set(sessionID, {
-        recheckAt: timers.now() + AWAIT_IDLE_RECHECK_MS,
-      })
-      // This is correctness state, not a cache: evicting it could let another
-      // prompt overlap the turn it guards. Idle/deleted events, disposal, or a
-      // blocked delivery's live-status watchdog remove it instead.
-    }
-
-    const wait = (ms: number): Promise<void> => {
-      const signal = disposeSignal.signal
-      if (signal.aborted) {
-        return Promise.reject(
-          signal.reason instanceof Error
-            ? signal.reason
-            : new Error("The cron plugin is shutting down."),
-        )
-      }
-      return new Promise<void>((resolve, reject) => {
-        let timer: unknown
-        const onAbort = () => {
-          timers.clearTimer(timer)
-          reject(
-            signal.reason instanceof Error
-              ? signal.reason
-              : new Error("The cron plugin is shutting down."),
-          )
-        }
-        signal.addEventListener("abort", onAbort, { once: true })
-        timer = timers.setTimer(() => {
-          signal.removeEventListener("abort", onAbort)
-          resolve()
-        }, ms)
-      })
-    }
-
-    // Only the stored message proves a fire was accepted: promptAsync answers
-    // 204 BEFORE its forked prompt work resolves the agent and writes the user
-    // message (failures after the fork are only logged and published as session
-    // errors), and after a transport failure the request may have reached the
-    // host anyway. Poll briefly — the fork usually writes within milliseconds,
-    // but "not found" right now could be a prompt still landing. A fire that
-    // cannot be proven stays unknown, and the scheduler parks the job rather
-    // than risking a duplicate or an overlapping next occurrence.
-    const confirmEnqueued = async (
-      job: CronJob,
-      messageID: string,
-      sendProblem: string,
-      how: string,
-    ): Promise<DeliveryResult> => {
-      let lookupProblem = `message ${messageID} was not found on the host`
-      const delays =
-        job.recurring && job.nextFire !== undefined
-          ? NON_FINAL_CONFIRM_DELAYS_MS
-          : CONFIRM_DELAYS_MS
-      for (let attempt = 0; ; attempt++) {
-        try {
-          const found = await withDeliveryTimeout(
-            `confirming message ${messageID}`,
-            (signal) =>
-              client.session.message({
-                path: { id: job.sessionID, messageID },
-                query: { directory },
-                signal,
-              }),
-          )
-          if (!found.error && found.data) {
-            delivered(job, how)
-            return { outcome: "delivered" }
-          }
-        } catch (error) {
-          lookupProblem = `the message lookup failed: ${error instanceof Error ? error.message : String(error)}`
-        }
-        const delay = delays[attempt]
-        if (delay === undefined) break
-        await wait(delay)
-      }
-      return { outcome: "unknown", reason: `${sendProblem}; ${lookupProblem}` }
-    }
-
-    const deliverOne = async (
-      job: CronJob,
-      beginAttempt: () => string | undefined,
-    ): Promise<DeliveryResult> => {
-      // A previous job in this session has started a turn. Hand this fire back
-      // to the scheduler as pending; the next idle event will flush it after
-      // the host's assistant message exists, preserving message-ID ordering.
-      const awaiting = awaitingIdle.get(job.sessionID)
-      if (awaiting) {
-        scheduleAwaitingIdleRecheck(job.sessionID, awaiting)
-        return { outcome: "deferred" }
-      }
-      // The scheduler's idle snapshot predates this session's ordering wait.
-      if (!(await activity.isIdle(job.sessionID))) {
-        return { outcome: "deferred" }
-      }
-
-      // Echo the session's pinned agent/model/variant: the host resolves an
-      // omitted agent to the DEFAULT agent — not the session's own — and
-      // re-pins the session, stripping a pinned variant (see
-      // sessionPromptIdentity in permission-rules). An unreadable session
-      // fails the delivery instead of skipping the echo — nothing has been
-      // sent yet, so this is a definitive rejection and a retry is safe.
-      let identity: PromptIdentity
-      try {
-        const session = await withDeliveryTimeout(
-          `reading session ${job.sessionID}`,
-          (signal) =>
-            client.session.get({
-              path: { id: job.sessionID },
-              query: { directory },
-              signal,
+          lifecycle.signal.throwIfAborted()
+          return await Promise.race([
+            Promise.resolve().then(() => call(abort.signal)),
+            new Promise<never>((_, reject) => {
+              onAbort = () => reject(abort.signal.reason)
+              abort.signal.addEventListener("abort", onAbort, { once: true })
+              timer = setTimeout(
+                () => abort.abort(new Error("cron host request timed out")),
+                deliveryCallTimeoutMs,
+              )
+              unrefTimer(timer)
             }),
+          ])
+        } finally {
+          if (timer) clearTimeout(timer)
+          if (onAbort) abort.signal.removeEventListener("abort", onAbort)
+          lifecycle.signal.removeEventListener("abort", stop)
+        }
+      }
+
+      const errorTag = (error: unknown): string | undefined =>
+        error && typeof error === "object" && "_tag" in error
+          ? String(error._tag)
+          : undefined
+      const detail = (error: unknown) =>
+        error instanceof Error ? error.message : String(error)
+
+      function cancelRetry(sessionID: string) {
+        const timer = retries.get(sessionID)
+        if (timer !== undefined) timers.clearTimer(timer)
+        retries.delete(sessionID)
+      }
+
+      function retryWhenIdle(sessionID: string) {
+        if (
+          lifecycle.signal.aborted ||
+          retries.has(sessionID) ||
+          scheduler.list(sessionID).length === 0
         )
-        if (session.error || !session.data) {
+          return
+        retries.set(
+          sessionID,
+          timers.setTimer(() => {
+            retries.delete(sessionID)
+            scheduler.onSessionIdle(sessionID)
+          }, IDLE_RECHECK_MS),
+        )
+      }
+
+      // wait follows any successor execution, including new work admitted during
+      // cleanup. A failed probe never authorizes a fire; pending jobs retry later.
+      async function isIdle(sessionID: string): Promise<boolean> {
+        try {
+          await bounded((signal) =>
+            context.session.wait({ sessionID }, { signal }),
+          )
+          return true
+        } catch (error) {
+          if (errorTag(error) === "SessionNotFoundError") {
+            scheduler.dropSession(sessionID)
+            cancelRetry(sessionID)
+          } else retryWhenIdle(sessionID)
+          return false
+        }
+      }
+
+      async function rootSessionOf(sessionID: string): Promise<string> {
+        const visited = new Set<string>()
+        let current = sessionID
+        for (let depth = 0; depth < 16; depth++) {
+          if (visited.has(current))
+            throw new Error("Could not resolve top-level session: parent cycle")
+          visited.add(current)
+          const data = await bounded((signal) =>
+            context.session.get({ sessionID: current }, { signal }),
+          )
+          if (!data || data.id !== current)
+            throw new Error(
+              "Could not resolve top-level session: invalid session data",
+            )
+          if (!data.parentID) return current
+          current = data.parentID
+        }
+        throw new Error(
+          "Could not resolve top-level session: parent chain exceeds 16 sessions",
+        )
+      }
+
+      async function deliverOne(
+        job: CronJob,
+        beginAttempt: () => string | undefined,
+      ): Promise<DeliveryResult> {
+        if (!(await isIdle(job.sessionID))) return { outcome: "deferred" }
+        const id = beginAttempt()
+        if (!id)
           return {
             outcome: "rejected",
-            reason: `could not read the session to echo its agent/model: ${JSON.stringify(session.error ?? "no data")}`,
+            reason: "The job was removed before dispatch",
+          }
+        try {
+          const data = await bounded((signal) =>
+            context.session.prompt(
+              {
+                sessionID: job.sessionID,
+                id,
+                text: job.prompt,
+                delivery: "queue",
+              },
+              { signal },
+            ),
+          )
+          // Queue is essential: a user turn racing our idle probe cannot be
+          // steered by a reminder. No model/agent override changes the session.
+          if (
+            data.id !== id ||
+            data.sessionID !== job.sessionID ||
+            data.delivery !== "queue"
+          ) {
+            return {
+              outcome: "unknown",
+              reason: "Host returned an unexpected inbox acknowledgment",
+            }
+          }
+          return { outcome: "delivered" }
+        } catch (error) {
+          // Only typed admission rejections prove nothing was enqueued. Timeouts
+          // and transport failures remain ambiguous and MUST NOT be replayed.
+          const rejected = [
+            "InvalidRequestError",
+            "SessionNotFoundError",
+          ].includes(errorTag(error) ?? "")
+          return {
+            outcome: rejected ? "rejected" : "unknown",
+            reason: detail(error),
           }
         }
-        identity = sessionPromptIdentity(session.data)
-      } catch (error) {
-        return {
-          outcome: "rejected",
-          reason: `could not read the session to echo its agent/model: ${error instanceof Error ? error.message : String(error)}`,
+      }
+
+      scheduler = createScheduler({
+        ...timers,
+        isIdle,
+        mintMessageID: () => `msg_${randomUUID().replaceAll("-", "")}`,
+        deliver: (job, beginAttempt) => {
+          const previous = lanes.get(job.sessionID) ?? Promise.resolve()
+          const pending = previous
+            .catch(() => {})
+            .then(() => deliverOne(job, beginAttempt))
+          lanes.set(job.sessionID, pending)
+          void pending
+            .finally(() => {
+              if (lanes.get(job.sessionID) === pending)
+                lanes.delete(job.sessionID)
+            })
+            .catch(() => {})
+          return pending
+        },
+        log: (level, message) => {
+          if (level !== "info") console.warn(`[macarons.cron] ${message}`)
+        },
+      })
+
+      // V2 ships a broad built-in allow first. Insert our ask default immediately
+      // after it, before configured global/agent rules; explicit user rules and
+      // native saved approvals still retain their normal precedence.
+      const agents = await context.agent.transform((editor) => {
+        for (const current of editor.list()) {
+          editor.update(String(current.id), (agent) => {
+            const first = agent.permissions[0]
+            const afterDefault =
+              first?.action === "*" &&
+              first.resource === "*" &&
+              first.effect === "allow"
+                ? 1
+                : 0
+            agent.permissions.splice(afterDefault, 0, {
+              action: "cron",
+              resource: "*",
+              effect: "ask",
+            })
+          })
         }
-      }
-      // Activity can change during the identity read. Hand the job back before
-      // minting an ID; resuming it must read identity again, not reuse this pin.
-      if (!(await activity.isIdle(job.sessionID))) {
-        return { outcome: "deferred" }
-      }
-      // Mint only after the identity read and this session's ordering wait. An
-      // ID minted before either could sort behind a turn completed meanwhile.
-      const idleEpoch = idleEpochs.get(job.sessionID) ?? 0
-      const messageID = beginAttempt()
-      if (!messageID) {
-        return {
-          outcome: "rejected",
-          reason: "the cron job was removed before prompt dispatch",
-        }
-      }
-      const recordTurn = (result: DeliveryResult): DeliveryResult => {
-        if (
-          result.outcome === "delivered" &&
-          !disposeSignal.signal.aborted &&
-          (idleEpochs.get(job.sessionID) ?? 0) === idleEpoch
-        ) {
-          markAwaitingIdle(job.sessionID)
-        }
-        return result
-      }
-      // `variant` is accepted by the route but missing from the stale SDK
-      // body type, so the body rides through a widened variable.
-      const body: {
-        agent?: string
-        model?: { providerID: string; modelID: string }
-        variant?: string
-        messageID: string
-        parts: Array<{ type: "text"; text: string }>
-      } = {
-        ...promptIdentityBody(identity),
-        messageID,
-        parts: [{ type: "text", text: job.prompt }],
-      }
-      let result: { error?: unknown }
-      try {
-        result = await withDeliveryTimeout(
-          `prompting session ${job.sessionID}`,
-          (signal) =>
-            client.session.promptAsync({
-              path: { id: job.sessionID },
-              body,
-              query: { directory },
-              signal,
-            }),
-        )
-      } catch (error) {
-        return recordTurn(
-          await confirmEnqueued(
-            job,
-            messageID,
-            `the transport failed mid-request: ${error instanceof Error ? error.message : String(error)}`,
-            " (confirmed by message lookup after a transport failure)",
-          ),
-        )
-      }
-      if (result.error) {
-        // An error RESPONSE is definitive: promptAsync validates the session
-        // before forking the prompt work, and the fork reports its failures
-        // only through the event bus after the 204 — an error status can only
-        // mean the prompt was never enqueued.
-        return {
-          outcome: "rejected",
-          reason: `the host rejected the prompt: ${JSON.stringify(result.error)}`,
-        }
-      }
-      // The 204 is provisional; serial delivery cannot release the next job
-      // until this ID is visible and therefore ordered in host storage.
-      return recordTurn(
-        await confirmEnqueued(
-          job,
-          messageID,
-          "the host accepted the request but the prompt message never appeared",
-          "",
-        ),
-      )
-    }
-
-    const deliver = (
-      job: CronJob,
-      beginAttempt: () => string | undefined,
-    ): Promise<DeliveryResult> =>
-      inDeliveryLane(job.sessionID, () => deliverOne(job, beginAttempt))
-
-    // Separate logical clocks per session make same-millisecond cron prompts
-    // strictly ascending without skewing one busy session from another. The
-    // host uses message IDs as its chronological tiebreaker.
-    const messageTimes = new Map<string, number>()
-    const mintDeliveryMessageID = (sessionID: string): string => {
-      const now = timers.now()
-      const messageTime = Math.max(now, (messageTimes.get(sessionID) ?? -1) + 1)
-      messageTimes.set(sessionID, messageTime)
-      trim(messageTimes)
-      return mintMessageID(messageTime)
-    }
-
-    scheduler = createScheduler({
-      ...timers,
-      isIdle: (sessionID) => activity.isIdle(sessionID),
-      deliver,
-      mintMessageID: (job) => mintDeliveryMessageID(job.sessionID),
-      onFailure: (job) => {
-        const failure = job.failure
-        if (!failure) return
-        toast(
-          "error",
-          `cron: ${job.id} ${failure.kind === "ambiguous" ? "could not be confirmed" : "failed"} and was parked — inspect with cron_list`,
-        )
-      },
-      log: (level, message) => {
-        log(level, message)
-      },
-    })
-
-    // ---- tools ----------------------------------------------------------------
-
-    const z = tool.schema
-
-    return {
-      // OpenCode's hardcoded agent ruleset opens with a `"*": allow` rule, so
-      // an ask under a key nobody configured is silently allowed — without a
-      // cron rule, the permission gate on cron_create would never prompt.
-      // Inject the ask default into the loaded config before agent rulesets
-      // are built from it. An explicit user setting is left alone, and both
-      // agent-level carve-outs and session "always" replies are appended
-      // after config rules, so they still win under last-match-wins.
-      config: async (config) => {
-        config.permission ??= {}
-        const permissions = config.permission as Record<string, unknown>
-        if (permissions.cron === undefined) permissions.cron = "ask"
-      },
-
-      tool: {
-        cron_create: tool({
+      })
+      const tools = await context.tool.transform((editor) => {
+        editor.add({
+          name: "cron_create",
           description: CREATE_DESCRIPTION,
-          args: {
-            cron: z
-              .string()
-              .describe(
-                'Standard 5-field cron expression in local time: "M H DoM Mon DoW" (e.g. "*/5 * * * *" = every 5 minutes, "30 14 28 2 *" = Feb 28 at 2:30pm local once).',
-              ),
-            prompt: z
-              .string()
-              .describe("The prompt to enqueue at each fire time."),
-            recurring: z
-              .boolean()
-              .optional()
-              .describe(
-                'true (default) = normally fire on each cron match until deleted or auto-expired after 7 days; an unconfirmable delivery parks the job until deleted. false = fire once at the next match, then auto-delete. Use false for "remind me at X" one-shot requests with pinned minute/hour/dom/month.',
-              ),
-          },
-          async execute(args, ctx) {
-            ctx.abort.throwIfAborted()
+          options: { codemode: false },
+          input: Schema.Struct({
+            cron: Schema.String.annotate({
+              description: "Standard five-field cron expression in local time.",
+            }),
+            prompt: Schema.String.annotate({
+              description: "Full prompt to enqueue when the schedule fires.",
+            }),
+            recurring: Schema.optionalKey(Schema.Boolean),
+          }),
+          async execute(args, call) {
+            call.signal.throwIfAborted()
+            lifecycle.signal.throwIfAborted()
             const problem = validateCron(args.cron)
-            if (problem) {
+            if (problem)
               throw new Error(
                 `Invalid cron expression ${JSON.stringify(args.cron)}: ${problem}`,
               )
-            }
+            const sessionID = await rootSessionOf(call.sessionID)
+            if (scheduler.list(sessionID).length >= MAX_JOBS_PER_SESSION)
+              throw new Error(
+                `This session already has ${MAX_JOBS_PER_SESSION} cron jobs`,
+              )
+            if (nextMatch(args.cron, timers.now()) === undefined)
+              throw new Error("The expression never matches a future time")
             const recurring = args.recurring ?? true
-            const sessionID = await rootSessionOf(ctx.sessionID)
-            // Check the cap before prompting: never ask the user to approve a
-            // job the scheduler is about to refuse anyway.
-            if (scheduler.list(sessionID).length >= MAX_JOBS_PER_SESSION) {
-              throw new Error(
-                `This session already has ${MAX_JOBS_PER_SESSION} cron jobs — the per-session limit. Delete one with cron_delete first.`,
-              )
-            }
-            // Same rule as the cap check above: never ask the user to approve a
-            // job the scheduler will refuse anyway. An expression that never
-            // matches a future time can never fire.
-            if (nextMatch(args.cron, timers.now()) === undefined) {
-              throw new Error(
-                `The expression ${JSON.stringify(args.cron)} never matches a future time.`,
-              )
-            }
-            // Scheduling a future autonomous turn is a real capability grant;
-            // route it through the permission system. The pattern carries the
-            // FULL prompt: rules and the approval dialog match against it, so
-            // truncating would let two different prompts present the same ask
-            // and hide a long prompt's tail from deny rules. "Always allow"
-            // stores a cron/* rule, so persist-permissions and approve-for-me
-            // interop.
-            ctx.abort.throwIfAborted()
-            await ctx.ask({
-              permission: "cron",
-              patterns: [args.prompt],
-              always: ["*"],
+            await context.permission.assert({
+              sessionID: call.sessionID,
+              agent: call.agent,
+              action: "cron",
+              resources: [args.prompt],
+              save: ["*"],
               metadata: { cron: args.cron, prompt: args.prompt, recurring },
+              source: { type: "tool", messageID: call.messageID, id: call.id },
             })
-            // Approval can resolve after the calling turn was cancelled.
-            ctx.abort.throwIfAborted()
+            call.signal.throwIfAborted()
+            lifecycle.signal.throwIfAborted()
             const job = scheduler.create({
               sessionID,
               cron: args.cron,
               prompt: args.prompt,
               recurring,
             })
-            const lines = [
-              `Created cron job ${job.id}: "${job.cron}" (${recurring ? "recurring" : "one-shot"}).`,
-              `Next fire: ${job.nextFire !== undefined ? local(job.nextFire) : "unknown"}.`,
-              recurring
-                ? `Expires: ${job.expiresAt !== undefined ? local(job.expiresAt) : "unknown"} — recurring jobs last 7 days; the first fire at or past expiry is the final one.`
-                : "One-shot: the job deletes itself after firing.",
-            ]
-            log(
-              "info",
-              `job ${job.id} created for session ${sessionID}: ${job.cron}`,
-            )
             return {
-              title: `${job.id} · ${job.cron}`,
-              output: lines.join("\n"),
+              content: [
+                `Created cron job ${job.id}: "${job.cron}" (${recurring ? "recurring" : "one-shot"}).`,
+                `Next fire: ${job.nextFire === undefined ? "unknown" : local(job.nextFire)}.`,
+                recurring
+                  ? `Expires: ${local(job.expiresAt as number)} — recurring jobs last 7 days.`
+                  : "One-shot: the job deletes itself after admission to the host queue.",
+              ].join("\n"),
               metadata: { id: job.id, cron: job.cron, recurring },
             }
           },
-        }),
-
-        cron_list: tool({
+        })
+        editor.add({
+          name: "cron_list",
           description: LIST_DESCRIPTION,
-          args: {},
-          async execute(_args, ctx) {
-            const sessionID = await rootSessionOf(ctx.sessionID)
-            const jobs = scheduler.list(sessionID)
-            if (jobs.length === 0) {
-              return "No cron jobs are scheduled for this session."
-            }
+          options: { codemode: false },
+          input: Schema.Struct({}),
+          async execute(_args, call) {
+            const jobs = scheduler.list(await rootSessionOf(call.sessionID))
             return {
-              title: `${jobs.length} cron job(s)`,
-              output: [
-                `${jobs.length} cron job(s) for this session:`,
-                ...jobs.map(formatJob),
-              ].join("\n"),
+              content: jobs.length
+                ? [
+                    `${jobs.length} cron job(s) for this session:`,
+                    ...jobs.map(formatJob),
+                  ].join("\n")
+                : "No cron jobs are scheduled for this session.",
             }
           },
-        }),
-
-        cron_delete: tool({
+        })
+        editor.add({
+          name: "cron_delete",
           description: DELETE_DESCRIPTION,
-          args: {
-            id: z.string().describe("Job ID returned by cron_create."),
-          },
-          async execute(args, ctx) {
-            const sessionID = await rootSessionOf(ctx.sessionID)
-            if (!scheduler.remove(args.id, sessionID)) {
+          options: { codemode: false },
+          input: Schema.Struct({ id: Schema.String }),
+          async execute(args, call) {
+            const sessionID = await rootSessionOf(call.sessionID)
+            call.signal.throwIfAborted()
+            if (!scheduler.remove(args.id, sessionID))
               throw new Error(
-                `No cron job ${JSON.stringify(args.id)} exists for this session. Use cron_list to see current jobs.`,
+                `No cron job ${JSON.stringify(args.id)} exists for this session`,
               )
-            }
-            log("info", `job ${args.id} deleted from session ${sessionID}`)
-            return `Deleted cron job ${args.id}.`
+            if (!scheduler.list(sessionID).length) cancelRetry(sessionID)
+            return { content: `Deleted cron job ${args.id}.` }
           },
-        }),
-      },
+        })
+      })
 
-      event: async ({ event }) => {
-        // Recorded before anything awaits, so the cache never lags the host's
-        // own status map (see createSessionActivityTracker).
-        const statusForm =
-          (event as { properties?: { status?: unknown } } | undefined)
-            ?.properties?.status !== undefined
-        const seen = activity.observe(event)
-        if (!seen) return
-        if (seen.activity === "idle") {
-          // The host publishes session.status(idle) followed by the deprecated
-          // session.idle for the same transition. Keep legacy-only transitions
-          // working, but do not let the duplicate release the next lane job as
-          // though the turn started by the first fire had already completed.
-          if (!statusForm && suppressLegacyIdle.delete(seen.sessionID)) {
-            return
+      // Native events are global; session IDs scope our in-memory scheduler.
+      // A reconnect can miss events, so failed idle probes also re-arm a timer.
+      const watch = async () => {
+        try {
+          for await (const event of context.event.subscribe({
+            signal: lifecycle.signal,
+          })) {
+            if (lifecycle.signal.aborted) break
+            if (event.type === "session.deleted") {
+              scheduler.dropSession(event.data.sessionID)
+              cancelRetry(event.data.sessionID)
+            } else if (
+              [
+                "session.execution.succeeded",
+                "session.execution.failed",
+                "session.execution.interrupted",
+              ].includes(event.type) &&
+              "sessionID" in event.data &&
+              typeof event.data.sessionID === "string"
+            ) {
+              scheduler.onSessionIdle(event.data.sessionID)
+            }
           }
-          if (statusForm) {
-            suppressLegacyIdle.add(seen.sessionID)
-            trim(suppressLegacyIdle)
-          }
-          idleEpochs.set(
-            seen.sessionID,
-            (idleEpochs.get(seen.sessionID) ?? 0) + 1,
-          )
-          trim(idleEpochs)
-          clearAwaitingIdle(seen.sessionID)
-          // A genuine idle transition releases the pending jobs; the
-          // per-session lane preserves their turn order after reservation.
-          scheduler.onSessionIdle(seen.sessionID)
-          return
+        } catch {
+          // Timer recovery does not depend on a continuously connected stream.
         }
-        if (seen.activity === "gone") {
-          roots.delete(seen.sessionID)
-          messageTimes.delete(seen.sessionID)
-          idleEpochs.delete(seen.sessionID)
-          clearAwaitingIdle(seen.sessionID)
-          suppressLegacyIdle.delete(seen.sessionID)
-          scheduler.dropSession(seen.sessionID)
-          return
-        }
-        suppressLegacyIdle.delete(seen.sessionID)
-      },
+      }
+      void watch()
 
-      dispose: async () => {
+      return async () => {
+        lifecycle.abort(new Error("The cron plugin is shutting down"))
         scheduler.dispose()
-        disposeSignal.abort(new Error("The cron plugin is shutting down."))
-        activity.clear()
-        deliveryLanes.clear()
-        messageTimes.clear()
-        idleEpochs.clear()
-        for (const sessionID of [...awaitingIdle.keys()]) {
-          clearAwaitingIdle(sessionID)
-        }
-        suppressLegacyIdle.clear()
-      },
-    }
-  }
+        for (const sessionID of retries.keys()) cancelRetry(sessionID)
+        lanes.clear()
+        await Promise.all([tools.dispose(), agents.dispose()])
+      }
+    },
+  })
 }

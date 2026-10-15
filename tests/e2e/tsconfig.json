@@ -1,8 +1,16 @@
 {
   "extends": "../../tsconfig.server.json",
   "compilerOptions": {
-    "types": ["bun", "node"]
+    "types": [
+      "bun",
+      "node"
+    ]
   },
-  "include": ["**/*.ts", "**/*.tsx"],
-  "exclude": ["node_modules", "artifacts"]
+  "include": [
+    "v2"
+  ],
+  "exclude": [
+    "node_modules",
+    "artifacts"
+  ]
 }

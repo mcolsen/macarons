@@ -96,7 +96,16 @@ export function formatSearxngOutput(
 }
 
 export function searxngRequestUrl(base: string, params: SearchParams): string {
-  const url = new URL(`${base}/search`)
+  let url: URL
+  try {
+    url = new URL(base)
+  } catch {
+    throw new Error("Invalid SearXNG endpoint")
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:")
+    throw new Error("Invalid SearXNG endpoint")
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}/search`
+  url.hash = ""
   url.searchParams.set("q", params.query)
   url.searchParams.set("format", "json")
   url.searchParams.set("pageno", "1")

@@ -22,6 +22,7 @@ import {
   pluginState,
   readSourceDocs,
   renderEdits,
+  retiredPlugins,
   SourceConflictError,
   type SourceDoc,
   writeRenderedEdit,
@@ -43,12 +44,11 @@ Options:
   --dry-run            Show what would change without writing any file.
   -h, --help           Show this help.
 
-Ticking a plugin adds its server half to the config-dir opencode config and
-its TUI half to tui.json; unticking removes its entries from EVERY config file
-OpenCode loads plugins from at the user level (the config dir's
-config.json/opencode.json/opencode.jsonc and tui.json/tui.jsonc, plus
-~/.opencode's opencode.json/opencode.jsonc and tui.json/tui.jsonc), so no
-active origin is left behind. Restart OpenCode afterwards to load changes.`
+Ticking a plugin adds its package directory to opencode.json[c] and/or cli.json
+using OpenCode v2's plugins field. Macarons entries in legacy configuration
+files are migrated or removed; unrelated plugins and settings are preserved.
+Plugins replaced by OpenCode v2 are removed in the reviewed plan.
+Restart OpenCode afterwards to load changes.`
 
 export type Args = { configDir?: string; dryRun: boolean; help: boolean }
 
@@ -94,6 +94,26 @@ function printPlan(plan: Plan, options: PluginOptions, print: Printer): void {
     )
     // Show the configuration a freshly-installed plugin carries, so the user
     // sees the SearXNG URL / toggles before confirming the write.
+    if (installing && entry.plugin.id === "web-search") {
+      const obsolete = plan.edits.some(({ doc }) =>
+        [...doc.list, ...(doc.legacyList ?? [])].some((item) => {
+          const saved = Array.isArray(item)
+            ? item[1]
+            : item && typeof item === "object" && "options" in item
+              ? item.options
+              : undefined
+          return (
+            saved &&
+            typeof saved === "object" &&
+            ("exa" in saved || "order" in saved)
+          )
+        }),
+      )
+      if (obsolete)
+        print(
+          "             Legacy Exa/order options are retained but ignored by v2; OpenCode owns generic search.",
+        )
+    }
     const opts = options.get(entry.plugin.name)
     if (installing && opts)
       print(`             options: ${JSON.stringify(opts)}`)
@@ -153,6 +173,7 @@ export function warnUnmanagedSources(
     "OPENCODE_CONFIG",
     "OPENCODE_CONFIG_CONTENT",
     "OPENCODE_TUI_CONFIG",
+    "OPENCODE_CLI_CONFIG_CONTENT",
   ].filter((name) => env[name]?.trim())
   if (!flags.length) return
   const label = flags.length === 1 ? "that source" : "those sources"
@@ -418,6 +439,45 @@ async function confirmPlan(
   }
 }
 
+/** Creating cli.json suppresses the host's first-run migration. Let the host
+ * migrate settings it owns before the wizard creates that file. */
+export async function assertCliMigrationSafe(
+  plan: Plan,
+  docs: SourceDoc[],
+  env: Record<string, string | undefined>,
+  homedir: string,
+): Promise<void> {
+  if (
+    !plan.edits.some(
+      ({ doc, changed }) =>
+        changed && !doc.exists && path.basename(doc.source.file) === "cli.json",
+    )
+  )
+    return
+  const legacy = docs.filter(
+    (doc) =>
+      doc.exists &&
+      doc.source.kind === "tui" &&
+      doc.source.scope === "config-dir",
+  )
+  const state = path.join(
+    env.XDG_STATE_HOME || path.join(homedir, ".local", "state"),
+    "opencode",
+    "kv.json",
+  )
+  const hasState = await fs.access(state).then(
+    () => true,
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return false
+      throw error
+    },
+  )
+  if (!legacy.length && !hasState) return
+  throw new Error(
+    "Start OpenCode v2 once before installing TUI plugins so it can migrate tui.json and saved UI settings into cli.json. Then rerun bun setup; no files were changed.",
+  )
+}
+
 export type CliRuntime = {
   argv?: string[]
   env?: Record<string, string | undefined>
@@ -531,7 +591,9 @@ export async function runCli(runtime: CliRuntime = {}): Promise<void> {
     )
     if (cancellation.signal.aborted) throw new PromptCancelledError()
 
-    const plan = buildPlan(plugins, selection, docs, options)
+    const retired = retiredPlugins(repoRoot)
+    const plan = buildPlan([...plugins, ...retired], selection, docs, options)
+    await assertCliMigrationSafe(plan, docs, env, homedir)
     if (!plan.changed) {
       log("Already up to date — nothing to change.")
       return

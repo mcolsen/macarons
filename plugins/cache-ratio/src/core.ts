@@ -23,20 +23,6 @@
  * and a verdict on whether the newest request broke the prompt-cache prefix.
  */
 
-// The verified band is centralized in the shared library and rides the repo's
-// OpenCode pin (.opencode-version) — the policy comment lives there. The band
-// matters here because the prompt math above relies on the hosts' usage
-// normalization staying as verified.
-export {
-  isSubAgentSession,
-  openCodeCompatNotice,
-  reportTuiCompat,
-  routeSessionID,
-  SUPPORTED_OPENCODE_RANGE,
-  tuiGate,
-  warnTui,
-} from "@macarons/permission-rules"
-
 /** Token usage of one API request, as OpenCode records it on a step-finish part. */
 export type StepTokens = {
   input: number

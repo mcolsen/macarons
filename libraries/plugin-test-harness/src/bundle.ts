@@ -9,39 +9,10 @@ import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
 
-/**
- * The shared bundle skeleton (2026-07-23 audit §3, issue #116). A plugin with
- * a `build` script ships a bundled dist for the single-file
- * `.opencode/plugin/` install path; this proves that artifact stands alone:
- * built fresh into a bare temp dir (no package.json, no node_modules — the
- * environment the copied file really runs in), scanned for bare imports, and
- * loaded through a real dynamic import.
- *
- * The artifact under test is built by RUNNING `scripts.build`, redirected to
- * the temp dir — not by an independent Bun.build the suite composes itself.
- * An independently composed build is a second expression of the same intent,
- * and the two drift: `--packages=external` or `--no-bundle` on the real
- * script ships a dist full of bare specifiers while a self-composed artifact
- * stays fully bundled and importable, so every assertion below passes about a
- * file no user ever receives. Pinning a couple of substrings of the script
- * only denies the flags someone thought of. Executing the declared command
- * removes the second expression entirely.
- *
- * The command must therefore be one plain `bun build` invocation whose flags
- * this harness understands (see parseBuildCommand) — an unrecognized flag is
- * a loud failure asking for a deliberate harness change, because flags like
- * `--format=cjs` would leave the ESM import scan below matching nothing and
- * passing vacuously.
- *
- * Always a subprocess with cwd at the package root, exactly as `bun run
- * build` runs it: in-process Bun.build inherits the test runner's cwd, so a
- * dependency bun did not hoist (approve-for-me's jsonc-parser) resolves out
- * of bun's install cache and emits unresolvable relative CommonJS requires —
- * an artifact that fails only when imported.
- *
- * Call at the top level of bundle.test.ts: the build registers as a
- * file-level beforeAll, so per-plugin integration describes elsewhere in the
- * file can reach the artifact through the returned context.
+/** Build the declared native server package and validate its runtime imports.
+ * Native v2 loads package directories, so externals are allowed only when
+ * declared runtime dependencies. The staged import exposes exactly those
+ * dependencies; dev-only workspace hoisting cannot hide a packaging error.
  */
 export type BundleOptions = {
   /** The calling test file's `import.meta.dir` (the plugin's test/ dir). */
@@ -60,6 +31,7 @@ export type BundleContext = {
 type PackageJson = {
   scripts?: Record<string, string>
   exports?: Record<string, string>
+  dependencies?: Record<string, string>
 }
 
 /**
@@ -69,11 +41,17 @@ type PackageJson = {
  * silently invalidate the assertions that run against the output, so the
  * failure is "teach the harness about this flag", not "assume it is benign".
  */
-const KNOWN_FLAGS = new Set(["--target", "--outfile"])
+const KNOWN_FLAGS = new Set([
+  "--target",
+  "--outfile",
+  "--packages",
+  "--external",
+])
 
 type BuildCommand = {
   entrypoint: string
   flags: Map<string, string>
+  externals: string[]
 }
 
 function parseBuildCommand(script: string): BuildCommand {
@@ -87,28 +65,32 @@ function parseBuildCommand(script: string): BuildCommand {
 
   const entrypoints: string[] = []
   const flags = new Map<string, string>()
-  for (const token of rest) {
+  const externals: string[] = []
+  for (let index = 0; index < rest.length; index++) {
+    const token = rest[index] as string
     if (!token.startsWith("-")) {
       entrypoints.push(token)
       continue
     }
     const eq = token.indexOf("=")
     const name = eq < 0 ? token : token.slice(0, eq)
-    if (!KNOWN_FLAGS.has(name) || eq < 0)
-      throw new Error(
-        `describeBundle does not understand \`${token}\` and will not guess ` +
-          `what it does to the artifact — teach parseBuildCommand about it ` +
-          `(and whatever assertion it affects) first: ${script}`,
-      )
-    flags.set(name, token.slice(eq + 1))
+    if (!KNOWN_FLAGS.has(name))
+      throw new Error(`Unsupported build flag ${token}`)
+    const value = eq < 0 ? rest[++index] : token.slice(eq + 1)
+    if (!value || value.startsWith("--"))
+      throw new Error(`Missing value for ${name}`)
+    if (name === "--external") externals.push(value)
+    else flags.set(name, value)
   }
+  if (flags.has("--packages") && flags.get("--packages") !== "external")
+    throw new Error("Only --packages=external is supported")
 
   const [entrypoint] = entrypoints
   if (entrypoints.length !== 1 || entrypoint === undefined)
     throw new Error(`build script names ${entrypoints.length} entrypoints`)
   if (!flags.has("--outfile"))
     throw new Error(`build script names no --outfile: ${script}`)
-  return { entrypoint, flags }
+  return { entrypoint, flags, externals }
 }
 
 export function describeBundle(options: BundleOptions): BundleContext {
@@ -147,11 +129,22 @@ export function describeBundle(options: BundleOptions): BundleContext {
     const args = ["build", command.entrypoint]
     for (const [name, value] of command.flags)
       args.push(`${name}=${name === "--outfile" ? artifact : value}`)
+    for (const external of command.externals) args.push("--external", external)
     await execFileAsync("bun", args, { cwd: root })
+    const dependencies = (await readPackageJson()).dependencies ?? {}
+    for (const dependency of Object.keys(dependencies)) {
+      const target = path.join(dir, "node_modules", dependency)
+      await fs.mkdir(path.dirname(target), { recursive: true })
+      await fs.symlink(
+        await fs.realpath(path.join(root, "node_modules", dependency)),
+        target,
+        "dir",
+      )
+    }
   })
 
   afterAll(async () => {
-    await fs.rm(dir, { recursive: true, force: true })
+    if (dir) await fs.rm(dir, { recursive: true, force: true })
   })
 
   const context: BundleContext = {
@@ -177,23 +170,35 @@ export function describeBundle(options: BundleOptions): BundleContext {
       )
     })
 
-    test("imports nothing but node builtins", async () => {
+    test("external imports are node builtins or declared runtime dependencies", async () => {
       const text = await fs.readFile(artifact, "utf8")
       const specifiers = [
         ...text.matchAll(
           /^(?:import\s[^"']*|export\s[^"']*\sfrom\s*)["']([^"']+)["']/gm,
         ),
       ].map((match) => match[1])
+      const dependencies = (await readPackageJson()).dependencies ?? {}
       for (const specifier of specifiers) {
         if (specifier === undefined) continue
-        expect(builtinModules).toContain(specifier.replace(/^node:/, ""))
+        if (builtinModules.includes(specifier.replace(/^node:/, ""))) continue
+        const name = specifier.startsWith("@")
+          ? specifier.split("/").slice(0, 2).join("/")
+          : specifier.split("/")[0]
+        expect(
+          name && name in dependencies,
+          `${specifier} is not a declared dependency`,
+        ).toBe(true)
       }
     })
 
-    test("keeps the legacy loader contract: only the plugin function is exported", async () => {
+    test("keeps the native v2 default plugin definition", async () => {
       const mod = await context.importArtifact()
-      expect(Object.keys(mod).sort()).toEqual([options.exportName])
-      expect(typeof mod[options.exportName]).toBe("function")
+      const definition = mod.default as
+        | { id?: unknown; setup?: unknown }
+        | undefined
+      expect(typeof definition?.id).toBe("string")
+      expect(typeof definition?.setup).toBe("function")
+      expect(mod[options.exportName]).toBe(definition)
     })
   })
 

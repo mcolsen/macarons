@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import path from "node:path"
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..", "..")
@@ -8,7 +8,13 @@ const REPO_ROOT = path.resolve(import.meta.dir, "..", "..", "..")
 function gitLsFiles(...patterns: string[]): string[] {
   return execFileSync(
     "git",
-    ["ls-files", ...patterns.map((pattern) => `:(glob)${pattern}`)],
+    [
+      "ls-files",
+      "--cached",
+      "--others",
+      "--exclude-standard",
+      ...patterns.map((pattern) => `:(glob)${pattern}`),
+    ],
     {
       cwd: REPO_ROOT,
       encoding: "utf8",
@@ -16,7 +22,7 @@ function gitLsFiles(...patterns: string[]): string[] {
     },
   )
     .split("\n")
-    .filter(Boolean)
+    .filter((file) => file && existsSync(path.join(REPO_ROOT, file)))
 }
 
 function collectActionUses(
